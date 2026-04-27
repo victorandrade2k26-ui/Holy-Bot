@@ -464,14 +464,7 @@ async function sendProductMessage(interaction, product) {
 client.once("ready", async () => {
   console.log(`✅ Bot online como ${client.user.tag}`);
 
-  const guild = client.guilds.cache.get(process.env.GUILD_ID);
-
-  if (!guild) {
-    console.log("❌ GUILD_ID inválido ou bot fora do servidor.");
-    return;
-  }
-
-  await guild.commands.set([
+  const commands = [
     new SlashCommandBuilder()
       .setName("painel")
       .setDescription("Abre o painel de configuração do bot.")
@@ -570,7 +563,20 @@ client.once("ready", async () => {
           .setRequired(false)
       )
       .toJSON()
-  ]);
+  ];
+
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      await guild.commands.set(commands);
+      console.log(`✅ Comandos registrados em: ${guild.name}`);
+    } catch (error) {
+      console.log(`❌ Erro ao registrar comandos em: ${guild.name}`);
+      console.error(error);
+    }
+  }
+
+  console.log("✅ Registro de comandos finalizado.");
+});
 
   console.log("✅ Comandos /painel, /addproduto e /addcupom registrados.");
 });
