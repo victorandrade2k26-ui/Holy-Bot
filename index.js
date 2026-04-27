@@ -578,9 +578,6 @@ client.once("ready", async () => {
   console.log("✅ Registro de comandos finalizado.");
 });
 
-  console.log("✅ Comandos /painel, /addproduto e /addcupom registrados.");
-});
-
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
