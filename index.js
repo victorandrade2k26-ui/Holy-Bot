@@ -24,11 +24,24 @@ const client = new Client({
 
 const DB_FILE = "./database.json";
 
+function saveDB(db) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+}
+
 function loadDB() {
   if (!fs.existsSync(DB_FILE)) {
     fs.writeFileSync(
       DB_FILE,
-      JSON.stringify({ products: {}, carts: {}, coupons: {} }, null, 2)
+      JSON.stringify(
+        {
+          products: {},
+          carts: {},
+          coupons: {},
+          guildConfigs: {}
+        },
+        null,
+        2
+      )
     );
   }
 
@@ -37,13 +50,10 @@ function loadDB() {
   if (!db.products) db.products = {};
   if (!db.carts) db.carts = {};
   if (!db.coupons) db.coupons = {};
+  if (!db.guildConfigs) db.guildConfigs = {};
 
   saveDB(db);
   return db;
-}
-
-function saveDB(db) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
 function generateId() {
@@ -52,16 +62,6 @@ function generateId() {
 
 function formatMoney(value) {
   return `R$ ${Number(value).toFixed(2).replace(".", ",")}`;
-}
-
-function isAdmin(member) {
-  if (!member) return false;
-
-  return (
-    member.permissions.has(PermissionsBitField.Flags.Administrator) ||
-    member.permissions.has(PermissionsBitField.Flags.ManageGuild) ||
-    member.roles.cache.has(process.env.ADMIN_ROLE_ID)
-  );
 }
 
 function sanitizeChannelName(name) {
@@ -82,9 +82,142 @@ function parseColor(color) {
   return parseInt(clean, 16);
 }
 
+function getGuildConfig(guildId) {
+  const db = loadDB();
+
+  if (!db.guildConfigs[guildId]) {
+    db.guildConfigs[guildId] = {
+      storeName: "Holy Store",
+      mainColor: "#F1C40F",
+      adminRoleId: process.env.ADMIN_ROLE_ID || null,
+      deliveryChannelId: process.env.DELIVERY_CHANNEL_ID || null,
+      pixKey: process.env.PIX_KEY || null,
+      cartCategoryId: null
+    };
+
+    saveDB(db);
+  }
+
+  return db.guildConfigs[guildId];
+}
+
+function updateGuildConfig(guildId, data) {
+  const db = loadDB();
+
+  if (!db.guildConfigs[guildId]) {
+    db.guildConfigs[guildId] = {
+      storeName: "Holy Store",
+      mainColor: "#F1C40F",
+      adminRoleId: process.env.ADMIN_ROLE_ID || null,
+      deliveryChannelId: process.env.DELIVERY_CHANNEL_ID || null,
+      pixKey: process.env.PIX_KEY || null,
+      cartCategoryId: null
+    };
+  }
+
+  db.guildConfigs[guildId] = {
+    ...db.guildConfigs[guildId],
+    ...data
+  };
+
+  saveDB(db);
+  return db.guildConfigs[guildId];
+}
+
+function getConfigColor(guildId) {
+  const config = getGuildConfig(guildId);
+  return parseColor(config.mainColor || "#F1C40F");
+}
+
+function isAdmin(member) {
+  if (!member) return false;
+
+  const config = getGuildConfig(member.guild.id);
+  const adminRoleId = config.adminRoleId || process.env.ADMIN_ROLE_ID;
+
+  return (
+    member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+    member.permissions.has(PermissionsBitField.Flags.ManageGuild) ||
+    (adminRoleId && member.roles.cache.has(adminRoleId))
+  );
+}
+
+function isConfigured(guildId) {
+  const config = getGuildConfig(guildId);
+
+  return Boolean(
+    (config.adminRoleId || process.env.ADMIN_ROLE_ID) &&
+      (config.deliveryChannelId || process.env.DELIVERY_CHANNEL_ID) &&
+      (config.pixKey || process.env.PIX_KEY)
+  );
+}
+
+async function sendConfigPanel(interaction) {
+  const config = getGuildConfig(interaction.guild.id);
+
+  const embed = new EmbedBuilder()
+    .setColor(getConfigColor(interaction.guild.id))
+    .setTitle("Painel de Configuração")
+    .setDescription(
+      "Configure as principais informações do bot neste servidor.\n\n" +
+        `**Nome da loja:** ${config.storeName || "Não configurado"}\n` +
+        `**Cor principal:** ${config.mainColor || "Não configurado"}\n` +
+        `**Cargo admin:** ${
+          config.adminRoleId ? `<@&${config.adminRoleId}>` : "Não configurado"
+        }\n` +
+        `**Canal de entregas:** ${
+          config.deliveryChannelId
+            ? `<#${config.deliveryChannelId}>`
+            : "Não configurado"
+        }\n` +
+        `**Categoria dos carrinhos:** ${
+          config.cartCategoryId ? `<#${config.cartCategoryId}>` : "Automática"
+        }\n` +
+        `**Chave Pix:** ${config.pixKey ? `\`${config.pixKey}\`` : "Não configurada"}`
+    )
+    .setFooter({ text: "Sistema de configuração" })
+    .setTimestamp();
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("config_loja")
+      .setLabel("Configurar loja")
+      .setEmoji("🏪")
+      .setStyle(ButtonStyle.Primary),
+
+    new ButtonBuilder()
+      .setCustomId("config_canais")
+      .setLabel("Configurar canais")
+      .setEmoji("📁")
+      .setStyle(ButtonStyle.Secondary),
+
+    new ButtonBuilder()
+      .setCustomId("config_pagamento")
+      .setLabel("Configurar pagamento")
+      .setEmoji("💸")
+      .setStyle(ButtonStyle.Success)
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("config_verificar")
+      .setLabel("Verificar configuração")
+      .setEmoji("✅")
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  return interaction.reply({
+    embeds: [embed],
+    components: [row1, row2],
+    ephemeral: true
+  });
+}
+
 async function getOrCreateCart(interaction, db) {
   const guild = interaction.guild;
   const user = interaction.user;
+  const config = getGuildConfig(guild.id);
+  const adminRoleId = config.adminRoleId || process.env.ADMIN_ROLE_ID;
 
   let cart = Object.values(db.carts).find(
     (c) => c.userId === user.id && c.status === "open"
@@ -95,9 +228,17 @@ async function getOrCreateCart(interaction, db) {
     if (oldChannel) return { cart, channel: oldChannel };
   }
 
-  let category = guild.channels.cache.find(
-    (c) => c.name === "🛒・carrinhos" && c.type === ChannelType.GuildCategory
-  );
+  let category = null;
+
+  if (config.cartCategoryId) {
+    category = guild.channels.cache.get(config.cartCategoryId);
+  }
+
+  if (!category || category.type !== ChannelType.GuildCategory) {
+    category = guild.channels.cache.find(
+      (c) => c.name === "🛒・carrinhos" && c.type === ChannelType.GuildCategory
+    );
+  }
 
   if (!category) {
     category = await guild.channels.create({
@@ -106,48 +247,58 @@ async function getOrCreateCart(interaction, db) {
     });
   }
 
+  updateGuildConfig(guild.id, {
+    cartCategoryId: category.id
+  });
+
+  const permissionOverwrites = [
+    {
+      id: guild.id,
+      deny: [PermissionsBitField.Flags.ViewChannel]
+    },
+    {
+      id: user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory
+      ]
+    },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ManageChannels,
+        PermissionsBitField.Flags.EmbedLinks,
+        PermissionsBitField.Flags.ReadMessageHistory
+      ]
+    }
+  ];
+
+  if (adminRoleId) {
+    permissionOverwrites.push({
+      id: adminRoleId,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.ManageChannels
+      ]
+    });
+  }
+
   const channel = await guild.channels.create({
     name: `carrinho-${sanitizeChannelName(user.username)}`,
     type: ChannelType.GuildText,
     parent: category.id,
-    permissionOverwrites: [
-      {
-        id: guild.id,
-        deny: [PermissionsBitField.Flags.ViewChannel]
-      },
-      {
-        id: user.id,
-        allow: [
-          PermissionsBitField.Flags.ViewChannel,
-          PermissionsBitField.Flags.SendMessages,
-          PermissionsBitField.Flags.ReadMessageHistory
-        ]
-      },
-      {
-        id: process.env.ADMIN_ROLE_ID,
-        allow: [
-          PermissionsBitField.Flags.ViewChannel,
-          PermissionsBitField.Flags.SendMessages,
-          PermissionsBitField.Flags.ReadMessageHistory,
-          PermissionsBitField.Flags.ManageChannels
-        ]
-      },
-      {
-        id: client.user.id,
-        allow: [
-          PermissionsBitField.Flags.ViewChannel,
-          PermissionsBitField.Flags.SendMessages,
-          PermissionsBitField.Flags.ManageChannels,
-          PermissionsBitField.Flags.EmbedLinks,
-          PermissionsBitField.Flags.ReadMessageHistory
-        ]
-      }
-    ]
+    permissionOverwrites
   });
 
   cart = {
     id: generateId(),
     userId: user.id,
+    guildId: guild.id,
     channelId: channel.id,
     items: [],
     discount: 0,
@@ -164,7 +315,7 @@ async function getOrCreateCart(interaction, db) {
     content: `<@${user.id}>`,
     embeds: [
       new EmbedBuilder()
-        .setColor(0xf1c40f)
+        .setColor(getConfigColor(guild.id))
         .setTitle("Carrinho criado")
         .setDescription(
           "Este é o seu carrinho exclusivo.\nAdicione produtos, vá para o pagamento ou delete o carrinho caso tenha aberto por engano."
@@ -197,7 +348,7 @@ async function renderCart(channel, cart) {
           .join("\n\n");
 
   const embed = new EmbedBuilder()
-    .setColor(0xf1c40f)
+    .setColor(getConfigColor(channel.guild.id))
     .setTitle("Resumo de compras")
     .setDescription(productsText)
     .addFields(
@@ -322,6 +473,11 @@ client.once("ready", async () => {
 
   await guild.commands.set([
     new SlashCommandBuilder()
+      .setName("painel")
+      .setDescription("Abre o painel de configuração do bot.")
+      .toJSON(),
+
+    new SlashCommandBuilder()
       .setName("addproduto")
       .setDescription("Cria uma mensagem de produto personalizada.")
       .addStringOption((option) =>
@@ -416,16 +572,34 @@ client.once("ready", async () => {
       .toJSON()
   ]);
 
-  console.log("✅ Comandos /addproduto e /addcupom registrados.");
+  console.log("✅ Comandos /painel, /addproduto e /addcupom registrados.");
 });
 
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
+      if (interaction.commandName === "painel") {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({
+            content: "❌ Apenas administradores podem abrir o painel.",
+            ephemeral: true
+          });
+        }
+
+        return sendConfigPanel(interaction);
+      }
+
       if (interaction.commandName === "addproduto") {
         if (!isAdmin(interaction.member)) {
           return interaction.reply({
             content: "❌ Apenas administradores podem adicionar produtos.",
+            ephemeral: true
+          });
+        }
+
+        if (!isConfigured(interaction.guild.id)) {
+          return interaction.reply({
+            content: "❌ Configure o bot primeiro usando `/painel`.",
             ephemeral: true
           });
         }
@@ -440,7 +614,7 @@ client.on("interactionCreate", async (interaction) => {
         const color = parseColor(interaction.options.getString("cor"));
         const footer =
           interaction.options.getString("rodape") ||
-          "Holy Store - Todos os direitos reservados";
+          `${getGuildConfig(interaction.guild.id).storeName} - Todos os direitos reservados`;
 
         if (price <= 0) {
           return interaction.reply({
@@ -460,6 +634,7 @@ client.on("interactionCreate", async (interaction) => {
 
         const product = {
           id: generateId(),
+          guildId: interaction.guild.id,
           title,
           name,
           price,
@@ -487,6 +662,13 @@ client.on("interactionCreate", async (interaction) => {
         if (!isAdmin(interaction.member)) {
           return interaction.reply({
             content: "❌ Apenas administradores podem criar cupons.",
+            ephemeral: true
+          });
+        }
+
+        if (!isConfigured(interaction.guild.id)) {
+          return interaction.reply({
+            content: "❌ Configure o bot primeiro usando `/painel`.",
             ephemeral: true
           });
         }
@@ -522,8 +704,9 @@ client.on("interactionCreate", async (interaction) => {
 
         const db = loadDB();
 
-        db.coupons[code] = {
+        db.coupons[`${interaction.guild.id}_${code}`] = {
           code,
+          guildId: interaction.guild.id,
           discount,
           createdBy: interaction.user.id,
           createdAt: Date.now(),
@@ -541,7 +724,7 @@ client.on("interactionCreate", async (interaction) => {
               `💸 **Desconto:** ${discount}%\n\n` +
               "Para usar, abra seu carrinho, clique em **Aplicar cupom** e digite o código acima."
           )
-          .setFooter({ text: "Holy Store - Sistema de Cupons" })
+          .setFooter({ text: `${getGuildConfig(interaction.guild.id).storeName} - Sistema de Cupons` })
           .setTimestamp();
 
         await interaction.channel.send({
@@ -558,13 +741,163 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isButton()) {
       const db = loadDB();
 
+      if (interaction.customId === "config_loja") {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({
+            content: "❌ Apenas administradores podem configurar a loja.",
+            ephemeral: true
+          });
+        }
+
+        const config = getGuildConfig(interaction.guild.id);
+
+        const modal = new ModalBuilder()
+          .setCustomId("modal_config_loja")
+          .setTitle("Configurar loja");
+
+        const storeNameInput = new TextInputBuilder()
+          .setCustomId("store_name")
+          .setLabel("Nome da loja")
+          .setPlaceholder("Exemplo: Holy Store")
+          .setValue(config.storeName || "Holy Store")
+          .setRequired(true)
+          .setStyle(TextInputStyle.Short);
+
+        const colorInput = new TextInputBuilder()
+          .setCustomId("main_color")
+          .setLabel("Cor principal em HEX")
+          .setPlaceholder("Exemplo: #F1C40F")
+          .setValue(config.mainColor || "#F1C40F")
+          .setRequired(true)
+          .setStyle(TextInputStyle.Short);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(storeNameInput),
+          new ActionRowBuilder().addComponents(colorInput)
+        );
+
+        return interaction.showModal(modal);
+      }
+
+      if (interaction.customId === "config_canais") {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({
+            content: "❌ Apenas administradores podem configurar os canais.",
+            ephemeral: true
+          });
+        }
+
+        const config = getGuildConfig(interaction.guild.id);
+
+        const modal = new ModalBuilder()
+          .setCustomId("modal_config_canais")
+          .setTitle("Configurar canais");
+
+        const adminRoleInput = new TextInputBuilder()
+          .setCustomId("admin_role_id")
+          .setLabel("ID do cargo admin")
+          .setPlaceholder("Exemplo: 123456789012345678")
+          .setValue(config.adminRoleId || "")
+          .setRequired(true)
+          .setStyle(TextInputStyle.Short);
+
+        const deliveryInput = new TextInputBuilder()
+          .setCustomId("delivery_channel_id")
+          .setLabel("ID do canal de entregas")
+          .setPlaceholder("Exemplo: 123456789012345678")
+          .setValue(config.deliveryChannelId || "")
+          .setRequired(true)
+          .setStyle(TextInputStyle.Short);
+
+        const categoryInput = new TextInputBuilder()
+          .setCustomId("cart_category_id")
+          .setLabel("ID da categoria carrinhos")
+          .setPlaceholder("Pode deixar vazio se quiser automático")
+          .setValue(config.cartCategoryId || "")
+          .setRequired(false)
+          .setStyle(TextInputStyle.Short);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(adminRoleInput),
+          new ActionRowBuilder().addComponents(deliveryInput),
+          new ActionRowBuilder().addComponents(categoryInput)
+        );
+
+        return interaction.showModal(modal);
+      }
+
+      if (interaction.customId === "config_pagamento") {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({
+            content: "❌ Apenas administradores podem configurar o pagamento.",
+            ephemeral: true
+          });
+        }
+
+        const config = getGuildConfig(interaction.guild.id);
+
+        const modal = new ModalBuilder()
+          .setCustomId("modal_config_pagamento")
+          .setTitle("Configurar pagamento");
+
+        const pixInput = new TextInputBuilder()
+          .setCustomId("pix_key")
+          .setLabel("Chave Pix")
+          .setPlaceholder("Digite sua chave Pix")
+          .setValue(config.pixKey || "")
+          .setRequired(true)
+          .setStyle(TextInputStyle.Short);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(pixInput));
+
+        return interaction.showModal(modal);
+      }
+
+      if (interaction.customId === "config_verificar") {
+        const config = getGuildConfig(interaction.guild.id);
+
+        const embed = new EmbedBuilder()
+          .setColor(isConfigured(interaction.guild.id) ? 0x2ecc71 : 0xe74c3c)
+          .setTitle("Verificação da configuração")
+          .setDescription(
+            `${config.storeName ? "✅" : "❌"} Nome da loja\n` +
+              `${config.mainColor ? "✅" : "❌"} Cor principal\n` +
+              `${config.adminRoleId ? "✅" : "❌"} Cargo admin\n` +
+              `${config.deliveryChannelId ? "✅" : "❌"} Canal de entregas\n` +
+              `${config.pixKey ? "✅" : "❌"} Chave Pix\n` +
+              `${config.cartCategoryId ? "✅" : "⚠️"} Categoria dos carrinhos\n\n` +
+              (isConfigured(interaction.guild.id)
+                ? "✅ O bot está configurado corretamente."
+                : "⚠️ Ainda falta alguma informação obrigatória.")
+          );
+
+        return interaction.reply({
+          embeds: [embed],
+          ephemeral: true
+        });
+      }
+
       if (interaction.customId.startsWith("addcart_")) {
+        if (!isConfigured(interaction.guild.id)) {
+          return interaction.reply({
+            content: "❌ Este servidor ainda não foi configurado. Use `/painel` primeiro.",
+            ephemeral: true
+          });
+        }
+
         const productId = interaction.customId.replace("addcart_", "");
         const product = db.products[productId];
 
         if (!product) {
           return interaction.reply({
             content: "❌ Produto não encontrado.",
+            ephemeral: true
+          });
+        }
+
+        if (product.guildId && product.guildId !== interaction.guild.id) {
+          return interaction.reply({
+            content: "❌ Este produto não pertence a este servidor.",
             ephemeral: true
           });
         }
@@ -678,6 +1011,9 @@ client.on("interactionCreate", async (interaction) => {
           });
         }
 
+        const config = getGuildConfig(interaction.guild.id);
+        const pixKey = config.pixKey || process.env.PIX_KEY;
+
         const subtotal = cart.items.reduce(
           (sum, item) => sum + item.price * item.quantity,
           0
@@ -690,7 +1026,7 @@ client.on("interactionCreate", async (interaction) => {
           .setTitle("Pagamento")
           .setDescription(
             `💸 **Valor total:** ${formatMoney(total)}\n\n` +
-              `🔑 **Chave Pix:**\n\`${process.env.PIX_KEY}\`\n\n` +
+              `🔑 **Chave Pix:**\n\`${pixKey}\`\n\n` +
               "Após pagar, envie o comprovante neste carrinho e clique em **Já paguei**."
           )
           .setFooter({ text: `Carrinho: ${cart.id}` });
@@ -727,8 +1063,11 @@ client.on("interactionCreate", async (interaction) => {
           });
         }
 
+        const config = getGuildConfig(interaction.guild.id);
+        const adminRoleId = config.adminRoleId || process.env.ADMIN_ROLE_ID;
+
         const embed = new EmbedBuilder()
-          .setColor(0xf1c40f)
+          .setColor(getConfigColor(interaction.guild.id))
           .setTitle("Pagamento aguardando aprovação")
           .setDescription(
             `<@${cart.userId}> informou que realizou o pagamento.\n\n` +
@@ -752,7 +1091,7 @@ client.on("interactionCreate", async (interaction) => {
         );
 
         return interaction.reply({
-          content: `<@&${process.env.ADMIN_ROLE_ID}>`,
+          content: adminRoleId ? `<@&${adminRoleId}>` : "Equipe",
           embeds: [embed],
           components: [row]
         });
@@ -828,9 +1167,11 @@ client.on("interactionCreate", async (interaction) => {
           components: []
         });
 
-        const deliveryChannel = interaction.guild.channels.cache.get(
-          process.env.DELIVERY_CHANNEL_ID
-        );
+        const config = getGuildConfig(interaction.guild.id);
+        const deliveryChannelId =
+          config.deliveryChannelId || process.env.DELIVERY_CHANNEL_ID;
+
+        const deliveryChannel = interaction.guild.channels.cache.get(deliveryChannelId);
 
         if (deliveryChannel) {
           await deliveryChannel.send({
@@ -842,7 +1183,7 @@ client.on("interactionCreate", async (interaction) => {
         try {
           const user = await client.users.fetch(cart.userId);
           await user.send(
-            "✅ Sua compra foi aprovada na Holy Store. Aguarde a entrega pelo servidor."
+            "✅ Sua compra foi aprovada. Aguarde a entrega pelo servidor."
           );
         } catch {}
       }
@@ -877,6 +1218,101 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (interaction.isModalSubmit()) {
+      if (interaction.customId === "modal_config_loja") {
+        const storeName = interaction.fields.getTextInputValue("store_name").trim();
+        const mainColor = interaction.fields.getTextInputValue("main_color").trim();
+
+        if (!/^#[0-9A-Fa-f]{6}$/.test(mainColor)) {
+          return interaction.reply({
+            content: "❌ Cor inválida. Use o formato HEX. Exemplo: #F1C40F",
+            ephemeral: true
+          });
+        }
+
+        updateGuildConfig(interaction.guild.id, {
+          storeName,
+          mainColor
+        });
+
+        return interaction.reply({
+          content: "✅ Configuração da loja salva com sucesso.",
+          ephemeral: true
+        });
+      }
+
+      if (interaction.customId === "modal_config_canais") {
+        const adminRoleId = interaction.fields
+          .getTextInputValue("admin_role_id")
+          .trim();
+
+        const deliveryChannelId = interaction.fields
+          .getTextInputValue("delivery_channel_id")
+          .trim();
+
+        const cartCategoryId = interaction.fields
+          .getTextInputValue("cart_category_id")
+          .trim();
+
+        const role = interaction.guild.roles.cache.get(adminRoleId);
+        const deliveryChannel = interaction.guild.channels.cache.get(deliveryChannelId);
+
+        if (!role) {
+          return interaction.reply({
+            content: "❌ Cargo admin não encontrado. Confira o ID.",
+            ephemeral: true
+          });
+        }
+
+        if (!deliveryChannel || deliveryChannel.type !== ChannelType.GuildText) {
+          return interaction.reply({
+            content: "❌ Canal de entregas inválido. Use o ID de um canal de texto.",
+            ephemeral: true
+          });
+        }
+
+        if (cartCategoryId) {
+          const category = interaction.guild.channels.cache.get(cartCategoryId);
+
+          if (!category || category.type !== ChannelType.GuildCategory) {
+            return interaction.reply({
+              content: "❌ Categoria inválida. Use o ID de uma categoria ou deixe vazio.",
+              ephemeral: true
+            });
+          }
+        }
+
+        updateGuildConfig(interaction.guild.id, {
+          adminRoleId,
+          deliveryChannelId,
+          cartCategoryId: cartCategoryId || null
+        });
+
+        return interaction.reply({
+          content: "✅ Canais e cargo admin configurados com sucesso.",
+          ephemeral: true
+        });
+      }
+
+      if (interaction.customId === "modal_config_pagamento") {
+        const pixKey = interaction.fields.getTextInputValue("pix_key").trim();
+
+        if (pixKey.length < 3) {
+          return interaction.reply({
+            content: "❌ Chave Pix inválida.",
+            ephemeral: true
+          });
+        }
+
+        updateGuildConfig(interaction.guild.id, {
+          pixKey
+        });
+
+        return interaction.reply({
+          content: "✅ Pagamento configurado com sucesso.",
+          ephemeral: true
+        });
+      }
+
       if (!interaction.customId.startsWith("coupon_modal_")) return;
 
       const cartId = interaction.customId.replace("coupon_modal_", "");
@@ -903,7 +1339,8 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      const couponData = db.coupons[coupon];
+      const couponData =
+        db.coupons[`${interaction.guild.id}_${coupon}`] || db.coupons[coupon];
 
       if (!couponData || couponData.active !== true) {
         return interaction.reply({
