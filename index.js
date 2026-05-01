@@ -294,7 +294,7 @@ async function sendConfigPanel(interaction) {
 
   const embed = new EmbedBuilder()
     .setColor(getConfigColor(interaction.guild.id))
-    .setTitle(`🎀 | ${config.storeName || "Anjinha Store"} - Painel de Configuração`)
+    .setTitle(`🎈 | ${config.storeName || "System Store"} - Painel de Configuração`)
     .setDescription(
       "Transforme sua loja virtual em um verdadeiro sucesso. Veja abaixo tudo que você pode configurar e personalizar para deixar o sistema pronto para vendas.\n\n" +
         "────────────────────────\n\n" +
@@ -319,12 +319,12 @@ async function sendConfigPanel(interaction) {
     .addFields(
       {
         name: "🏪 Nome da loja",
-        value: config.storeName ? `\`${config.storeName}\`` : "`Anjinha Store`",
+        value: config.storeName ? `\`${config.storeName}\`` : "`System Store`",
         inline: true
       },
       {
         name: "🎨 Cor principal",
-        value: config.mainColor ? `\`${config.mainColor}\`` : "`#9b59b6`",
+        value: config.mainColor ? `\`${config.mainColor}\`` : "`#000000`",
         inline: true
       },
       {
