@@ -90,7 +90,8 @@ function defaultDB() {
   return {
     guilds: {},
     products: {},
-    coupons: {}
+    coupons: {},
+    carts: {}
   };
 }
 
@@ -104,6 +105,7 @@ function loadDB() {
     if (!data.guilds) data.guilds = {};
     if (!data.products) data.products = {};
     if (!data.coupons) data.coupons = {};
+    if (!data.carts) data.carts = {};
     return data;
   } catch (err) {
     console.log("Erro ao ler database.json:", err);
@@ -252,6 +254,71 @@ function setGuildCoupons(guildId, coupons) {
   if (!db.coupons) db.coupons = {};
   db.coupons[guildId] = coupons;
   saveDB(db);
+}
+
+function getGuildCarts(guildId) {
+  const db = loadDB();
+  if (!db.carts) db.carts = {};
+  if (!db.carts[guildId]) {
+    db.carts[guildId] = {};
+    saveDB(db);
+  }
+  return db.carts[guildId];
+}
+
+function setGuildCarts(guildId, carts) {
+  const db = loadDB();
+  if (!db.carts) db.carts = {};
+  db.carts[guildId] = carts;
+  saveDB(db);
+}
+
+function getCart(guildId, cartId) {
+  const carts = getGuildCarts(guildId);
+  return carts[cartId] || null;
+}
+
+function saveCart(guildId, cart) {
+  const carts = getGuildCarts(guildId);
+  carts[cart.id] = cart;
+  setGuildCarts(guildId, carts);
+}
+
+function deleteCart(guildId, cartId) {
+  const carts = getGuildCarts(guildId);
+  delete carts[cartId];
+  setGuildCarts(guildId, carts);
+}
+
+function moneyBR(value) {
+  return `R$ ${Number(value || 0).toFixed(2).replace(".", ",")}`;
+}
+
+function calculateCartTotal(cart) {
+  const subtotal = Number(cart.productPrice || 0) * Number(cart.quantity || 1);
+  const discountPercent = Number(cart.discountPercent || 0);
+  const discountValue = subtotal * (discountPercent / 100);
+  const total = Math.max(0, subtotal - discountValue);
+  return { subtotal, discountPercent, discountValue, total };
+}
+
+async function getOrCreateCartCategory(guild) {
+  const existing = guild.channels.cache.find(
+    channel => channel.type === ChannelType.GuildCategory && channel.name === "🛒・carrinhos"
+  );
+
+  if (existing) return existing;
+
+  return guild.channels.create({
+    name: "🛒・carrinhos",
+    type: ChannelType.GuildCategory,
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionsBitField.Flags.ViewChannel]
+      }
+    ]
+  });
 }
 
 // =========================
@@ -656,6 +723,11 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId === "config_msg_entrada") return openMsgEntradaModal(interaction);
       if (interaction.customId === "config_msg_invites") return openMsgInvitesModal(interaction);
       if (interaction.customId.startsWith("comprar_")) return handleComprarProduto(interaction);
+      if (interaction.customId.startsWith("cart_coupon_")) return openCartCouponModal(interaction);
+      if (interaction.customId.startsWith("cart_payment_")) return handleCartPayment(interaction);
+      if (interaction.customId.startsWith("cart_paid_")) return handleCartPaid(interaction);
+      if (interaction.customId.startsWith("cart_confirm_")) return handleCartConfirm(interaction);
+      if (interaction.customId.startsWith("cart_close_")) return handleCartClose(interaction);
       if (interaction.customId.startsWith("ticket_open_")) return handleOpenTicket(interaction);
       if (interaction.customId === "ticket_close") return handleCloseTicket(interaction);
     }
@@ -669,6 +741,7 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId === "modal_canal_invites") return saveCanalInvites(interaction);
       if (interaction.customId === "modal_msg_entrada") return saveMsgEntrada(interaction);
       if (interaction.customId === "modal_msg_invites") return saveMsgInvites(interaction);
+      if (interaction.customId.startsWith("modal_cart_coupon_")) return saveCartCoupon(interaction);
     }
   } catch (err) {
     console.log("Erro em interactionCreate:", err);
@@ -1307,14 +1380,340 @@ async function handleComprarProduto(interaction) {
     });
   }
 
-  return interaction.reply({
-    content:
-      `🛒 **Pedido iniciado**\n\n` +
-      `Produto: **${produto.nome}**\n` +
-      `Valor: **R$ ${Number(produto.preco || 0).toFixed(2).replace(".", ",")}**\n\n` +
-      `Abra um ticket ou fale com a equipe para finalizar a compra.`,
+  await interaction.deferReply({ ephemeral: true });
+
+  const category = await getOrCreateCartCategory(interaction.guild);
+  const cartId = `${Date.now()}`;
+  const safeUser = interaction.user.username
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]/g, "-")
+    .toLowerCase()
+    .slice(0, 18);
+
+  const channel = await interaction.guild.channels.create({
+    name: `carrinho-${safeUser}`.slice(0, 90),
+    type: ChannelType.GuildText,
+    parent: category.id,
+    permissionOverwrites: [
+      {
+        id: interaction.guild.roles.everyone.id,
+        deny: [PermissionsBitField.Flags.ViewChannel]
+      },
+      {
+        id: interaction.user.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      },
+      {
+        id: client.user.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ManageChannels,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      }
+    ]
+  });
+
+  const cart = {
+    id: cartId,
+    guildId: interaction.guild.id,
+    channelId: channel.id,
+    userId: interaction.user.id,
+    productId: produto.id,
+    productName: produto.nome,
+    productPrice: Number(produto.preco || 0),
+    quantity: 1,
+    couponCode: null,
+    discountPercent: 0,
+    status: "aberto",
+    createdAt: new Date().toISOString()
+  };
+
+  saveCart(interaction.guild.id, cart);
+
+  await sendOrUpdateCartMessage(channel, cart, interaction.user);
+
+  return interaction.editReply({
+    content: `✅ Carrinho criado com sucesso: ${channel}`
+  });
+}
+
+async function sendOrUpdateCartMessage(channel, cart, user) {
+  const totals = calculateCartTotal(cart);
+  const config = getGuildConfig(cart.guildId);
+
+  const embed = new EmbedBuilder()
+    .setTitle("🛒 Carrinho de compra")
+    .setDescription(
+      `Olá, ${user}. Confira o resumo do seu pedido abaixo.\n\n` +
+      `Quando estiver tudo certo, clique em **Ir para pagamento**.`
+    )
+    .setColor(config.corPrincipal || "#FFFFFF")
+    .addFields(
+      { name: "📦 Produto", value: cart.productName || "Produto", inline: false },
+      { name: "🔢 Quantidade", value: `${cart.quantity || 1}`, inline: true },
+      { name: "💰 Subtotal", value: moneyBR(totals.subtotal), inline: true },
+      { name: "🎁 Cupom", value: cart.couponCode ? `\`${cart.couponCode}\` - ${totals.discountPercent}% OFF` : "Nenhum", inline: true },
+      { name: "💸 Desconto", value: moneyBR(totals.discountValue), inline: true },
+      { name: "✅ Total", value: `**${moneyBR(totals.total)}**`, inline: true },
+      { name: "📌 Status", value: cart.status || "aberto", inline: true }
+    )
+    .setFooter({ text: "Star Applications • Compra semi-automática" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cart_coupon_${cart.id}`)
+      .setLabel("Aplicar cupom")
+      .setEmoji("🎁")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`cart_payment_${cart.id}`)
+      .setLabel("Ir para pagamento")
+      .setEmoji("💳")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`cart_close_${cart.id}`)
+      .setLabel("Cancelar")
+      .setEmoji("🗑️")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return channel.send({
+    content: `<@${cart.userId}>`,
+    embeds: [embed],
+    components: [row]
+  });
+}
+
+async function openCartCouponModal(interaction) {
+  const cartId = interaction.customId.replace("cart_coupon_", "");
+  const cart = getCart(interaction.guild.id, cartId);
+
+  if (!cart) {
+    return interaction.reply({ content: "❌ Carrinho não encontrado.", ephemeral: true });
+  }
+
+  if (interaction.user.id !== cart.userId && !isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Apenas o dono do carrinho pode aplicar cupom.", ephemeral: true });
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`modal_cart_coupon_${cart.id}`)
+    .setTitle("Aplicar cupom");
+
+  const input = new TextInputBuilder()
+    .setCustomId("codigo_cupom")
+    .setLabel("Código do cupom")
+    .setPlaceholder("Exemplo: STAR10")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  return interaction.showModal(modal);
+}
+
+async function saveCartCoupon(interaction) {
+  const cartId = interaction.customId.replace("modal_cart_coupon_", "");
+  const cart = getCart(interaction.guild.id, cartId);
+
+  if (!cart) {
+    return interaction.reply({ content: "❌ Carrinho não encontrado.", ephemeral: true });
+  }
+
+  if (interaction.user.id !== cart.userId && !isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Apenas o dono do carrinho pode aplicar cupom.", ephemeral: true });
+  }
+
+  const codigo = interaction.fields.getTextInputValue("codigo_cupom").trim().toUpperCase();
+  const coupons = getGuildCoupons(interaction.guild.id);
+  const cupom = coupons.find(c => c.codigo === codigo);
+
+  if (!cupom) {
+    return interaction.reply({ content: "❌ Cupom inválido ou inexistente.", ephemeral: true });
+  }
+
+  cart.couponCode = cupom.codigo;
+  cart.discountPercent = Number(cupom.desconto || 0);
+  cart.status = "cupom aplicado";
+  saveCart(interaction.guild.id, cart);
+
+  await interaction.reply({
+    content: `✅ Cupom aplicado: \`${cupom.codigo}\` com ${cupom.desconto}% OFF.`,
     ephemeral: true
   });
+
+  const channel = interaction.guild.channels.cache.get(cart.channelId);
+  if (channel) {
+    const user = await interaction.guild.members.fetch(cart.userId).catch(() => null);
+    await sendOrUpdateCartMessage(channel, cart, user?.user || interaction.user);
+  }
+}
+
+async function handleCartPayment(interaction) {
+  const cartId = interaction.customId.replace("cart_payment_", "");
+  const cart = getCart(interaction.guild.id, cartId);
+
+  if (!cart) {
+    return interaction.reply({ content: "❌ Carrinho não encontrado.", ephemeral: true });
+  }
+
+  if (interaction.user.id !== cart.userId && !isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Apenas o dono do carrinho pode ir para o pagamento.", ephemeral: true });
+  }
+
+  const totals = calculateCartTotal(cart);
+  const pixKey = process.env.PIX_KEY || process.env.PIX_CHAVE || "Configure PIX_KEY no .env";
+
+  cart.status = "aguardando pagamento";
+  saveCart(interaction.guild.id, cart);
+
+  const embed = new EmbedBuilder()
+    .setTitle("💳 Pagamento semi-automático")
+    .setDescription(
+      `Realize o pagamento e depois clique em **Já paguei**.\n\n` +
+      `**Produto:** ${cart.productName}\n` +
+      `**Total:** ${moneyBR(totals.total)}\n\n` +
+      `**Chave Pix:**\n\`${pixKey}\`\n\n` +
+      `Após enviar o comprovante neste carrinho, a equipe irá confirmar manualmente.`
+    )
+    .setColor("#FFFFFF")
+    .setFooter({ text: "Star Applications • Aguardando pagamento" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cart_paid_${cart.id}`)
+      .setLabel("Já paguei")
+      .setEmoji("✅")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`cart_close_${cart.id}`)
+      .setLabel("Cancelar")
+      .setEmoji("🗑️")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return interaction.reply({ embeds: [embed], components: [row] });
+}
+
+async function handleCartPaid(interaction) {
+  const cartId = interaction.customId.replace("cart_paid_", "");
+  const cart = getCart(interaction.guild.id, cartId);
+
+  if (!cart) {
+    return interaction.reply({ content: "❌ Carrinho não encontrado.", ephemeral: true });
+  }
+
+  if (interaction.user.id !== cart.userId && !isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Apenas o dono do carrinho pode marcar como pago.", ephemeral: true });
+  }
+
+  cart.status = "pagamento enviado";
+  cart.paidAt = new Date().toISOString();
+  saveCart(interaction.guild.id, cart);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cart_confirm_${cart.id}`)
+      .setLabel("Confirmar pagamento")
+      .setEmoji("🛡️")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`cart_close_${cart.id}`)
+      .setLabel("Fechar carrinho")
+      .setEmoji("🔒")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return interaction.reply({
+    content:
+      `✅ <@${cart.userId}> marcou o pedido como pago.\n` +
+      `🛡️ Equipe, confira o comprovante e clique em **Confirmar pagamento**.`,
+    components: [row]
+  });
+}
+
+async function handleCartConfirm(interaction) {
+  const cartId = interaction.customId.replace("cart_confirm_", "");
+  const cart = getCart(interaction.guild.id, cartId);
+
+  if (!cart) {
+    return interaction.reply({ content: "❌ Carrinho não encontrado.", ephemeral: true });
+  }
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Apenas administradores podem confirmar pagamento.", ephemeral: true });
+  }
+
+  const products = getGuildProducts(interaction.guild.id);
+  const index = products.findIndex(p => p.id === cart.productId);
+
+  if (index >= 0 && Number(products[index].estoque ?? 0) > 0) {
+    products[index].estoque = Number(products[index].estoque || 0) - Number(cart.quantity || 1);
+    setGuildProducts(interaction.guild.id, products);
+  }
+
+  cart.status = "pagamento confirmado";
+  cart.confirmedBy = interaction.user.id;
+  cart.confirmedAt = new Date().toISOString();
+  saveCart(interaction.guild.id, cart);
+
+  const totals = calculateCartTotal(cart);
+  const config = getGuildConfig(interaction.guild.id);
+
+  if (config.canais.logsVendas) {
+    const logs = interaction.guild.channels.cache.get(config.canais.logsVendas);
+    if (logs) {
+      logs.send({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("💰 Venda confirmada")
+            .setColor("#FFFFFF")
+            .addFields(
+              { name: "Cliente", value: `<@${cart.userId}>`, inline: true },
+              { name: "Produto", value: cart.productName, inline: true },
+              { name: "Total", value: moneyBR(totals.total), inline: true },
+              { name: "Cupom", value: cart.couponCode || "Nenhum", inline: true },
+              { name: "Confirmado por", value: `<@${interaction.user.id}>`, inline: true }
+            )
+            .setTimestamp()
+        ]
+      }).catch(() => {});
+    }
+  }
+
+  return interaction.reply({
+    content:
+      `✅ Pagamento confirmado com sucesso.\n\n` +
+      `Cliente: <@${cart.userId}>\n` +
+      `Produto: **${cart.productName}**\n` +
+      `Total: **${moneyBR(totals.total)}**\n\n` +
+      `Agora a equipe pode entregar o produto ou ativar o plano com /setplano.`,
+    ephemeral: false
+  });
+}
+
+async function handleCartClose(interaction) {
+  const cartId = interaction.customId.replace("cart_close_", "");
+  const cart = getCart(interaction.guild.id, cartId);
+
+  if (cart && interaction.user.id !== cart.userId && !isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Apenas o dono do carrinho ou um administrador pode fechar.", ephemeral: true });
+  }
+
+  if (cart) deleteCart(interaction.guild.id, cartId);
+
+  await interaction.reply({ content: "🗑️ Carrinho será fechado em 5 segundos.", ephemeral: true }).catch(() => {});
+  setTimeout(() => {
+    interaction.channel.delete().catch(() => {});
+  }, 5000);
 }
 
 // =========================
