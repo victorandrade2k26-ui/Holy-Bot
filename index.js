@@ -2746,7 +2746,16 @@ async function handleCartPayment(interaction) {
 
   const totals = calculateCartTotal(cart);
   const config = getGuildConfig(interaction.guild.id);
-  const pixKey = config.compras?.pixKey || process.env.PIX_KEY || process.env.PIX_CHAVE || "Configure a chave Pix em /painelavancado > Compras";
+  const pixKey = config.compras?.pixKey;
+
+  if (!pixKey) {
+    return interaction.reply({
+      content:
+        "❌ A chave Pix deste servidor ainda não foi configurada.\n\n" +
+        "Use: `/painelavancado` → **Compras** → **Chave Pix**.",
+      ephemeral: true
+    });
+  }
 
   cart.status = "aguardando pagamento";
   saveCart(interaction.guild.id, cart);
