@@ -117,25 +117,39 @@ function saveDB(db) {
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
+function getDefaultGuildConfig() {
+  return {
+    plano: "basic",
+    lojaNome: "Star Applications",
+    corPrincipal: "#2B6CFF",
+    canais: {
+      entrada: null,
+      invites: null,
+      logsVendas: null,
+      categoriaCarrinho: null,
+      entregas: null
+    },
+    compras: {
+      pixKey: null
+    },
+    mensagens: {
+      entrada: "Bem-vindo(a), {user}, à {server}! Leia os canais de informações e aproveite sua experiência.",
+      invites: "{user} entrou no servidor. Convite usado: {invite}. Total de membros: {members}."
+    },
+    inviteCache: {}
+  };
+}
+
 function getGuildConfig(guildId) {
   const db = loadDB();
+  const defaults = getDefaultGuildConfig();
 
   if (!db.guilds[guildId]) {
-    db.guilds[guildId] = {
-      plano: "basic",
-      lojaNome: "Star Applications",
-      corPrincipal: "#2B6CFF",
-      canais: {
-        entrada: null,
-        invites: null,
-        logsVendas: null
-      },
-      mensagens: {
-        entrada: "Bem-vindo(a), {user}, à {server}! Leia os canais de informações e aproveite sua experiência.",
-        invites: "{user} entrou no servidor. Convite usado: {invite}. Total de membros: {members}."
-      },
-      inviteCache: {}
-    };
+    db.guilds[guildId] = defaults;
+    saveDB(db);
+  } else {
+    const normalized = deepMerge(defaults, db.guilds[guildId]);
+    db.guilds[guildId] = normalized;
     saveDB(db);
   }
 
@@ -195,6 +209,8 @@ function hasPlan(guildId, requiredPlan) {
 function getRequiredPlanForCommand(commandName) {
   const requiredPlans = {
     painel: "basic",
+    painelavancado: "basic",
+    painelanvacado: "basic",
     addproduto: "basic",
     editarproduto: "basic",
     addticket: "pro",
@@ -303,6 +319,13 @@ function calculateCartTotal(cart) {
 }
 
 async function getOrCreateCartCategory(guild) {
+  const config = getGuildConfig(guild.id);
+
+  if (config.canais?.categoriaCarrinho) {
+    const configured = guild.channels.cache.get(config.canais.categoriaCarrinho);
+    if (configured && configured.type === ChannelType.GuildCategory) return configured;
+  }
+
   const existing = guild.channels.cache.find(
     channel => channel.type === ChannelType.GuildCategory && channel.name === "🛒・carrinhos"
   );
@@ -344,6 +367,14 @@ const commands = [
   new SlashCommandBuilder()
     .setName("painel")
     .setDescription("Abre o painel de configuração da Star Sallers."),
+
+  new SlashCommandBuilder()
+    .setName("painelavancado")
+    .setDescription("Abre o painel avançado da Star Sallers."),
+
+  new SlashCommandBuilder()
+    .setName("painelanvacado")
+    .setDescription("Abre o painel avançado da Star Sallers."),
 
   new SlashCommandBuilder()
     .setName("addproduto")
@@ -575,11 +606,9 @@ async function registerCommands() {
 
   try {
     console.log("Registrando comandos globais...");
-
     await rest.put(Routes.applicationCommands(CLIENT_ID), {
       body: commands
     });
-
     console.log("Comandos globais registrados com sucesso.");
   } catch (err) {
     console.log("Erro ao registrar comandos:", err);
@@ -711,6 +740,7 @@ client.on("interactionCreate", async interaction => {
       }
 
       if (interaction.commandName === "painel") return handlePainel(interaction);
+      if (interaction.commandName === "painelavancado" || interaction.commandName === "painelanvacado") return handlePainelAvancado(interaction);
       if (interaction.commandName === "addproduto") return handleAddProduto(interaction);
       if (interaction.commandName === "editarproduto") return handleEditarProduto(interaction);
       if (interaction.commandName === "addticket") return handleAddTicket(interaction);
@@ -720,6 +750,14 @@ client.on("interactionCreate", async interaction => {
     if (interaction.isButton()) {
       if (interaction.customId === "painel_personalizacao") return handlePainelPersonalizacao(interaction);
       if (interaction.customId === "painel_planos") return handlePainelPlanos(interaction);
+      if (interaction.customId === "adv_cupons") return handleAdvancedCoupons(interaction);
+      if (interaction.customId === "adv_produtos") return handleAdvancedProducts(interaction);
+      if (interaction.customId === "adv_embed") return openAdvancedEmbedModal(interaction);
+      if (interaction.customId === "adv_compras") return handleAdvancedCompras(interaction);
+      if (interaction.customId === "adv_status") return handleAdvancedStatus(interaction);
+      if (interaction.customId === "adv_set_pix") return openAdvancedPixModal(interaction);
+      if (interaction.customId === "adv_set_cart_category") return openAdvancedCartCategoryModal(interaction);
+      if (interaction.customId === "adv_set_deliveries") return openAdvancedDeliveriesModal(interaction);
       if (interaction.customId === "config_canal_entrada") return openCanalEntradaModal(interaction);
       if (interaction.customId === "config_canal_invites") return openCanalInvitesModal(interaction);
       if (interaction.customId === "config_msg_entrada") return openMsgEntradaModal(interaction);
@@ -744,6 +782,10 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId === "modal_msg_entrada") return saveMsgEntrada(interaction);
       if (interaction.customId === "modal_msg_invites") return saveMsgInvites(interaction);
       if (interaction.customId.startsWith("modal_cart_coupon_")) return saveCartCoupon(interaction);
+      if (interaction.customId === "modal_adv_pix") return saveAdvancedPix(interaction);
+      if (interaction.customId === "modal_adv_cart_category") return saveAdvancedCartCategory(interaction);
+      if (interaction.customId === "modal_adv_deliveries") return saveAdvancedDeliveries(interaction);
+      if (interaction.customId === "modal_adv_embed") return sendAdvancedCustomEmbed(interaction);
     }
   } catch (err) {
     console.log("Erro em interactionCreate:", err);
@@ -948,6 +990,475 @@ async function handleSetPlano(interaction) {
       `Servidor: ${targetGuild ? `**${targetGuild.name}**` : "não encontrado no cache do bot"}\n` +
       `ID: \`${guildId}\`\n` +
       `Plano: ${planoInfo.emoji} **${planoInfo.nome}**`,
+    ephemeral: true
+  });
+}
+
+
+// =========================
+// PAINEL AVANÇADO
+// =========================
+
+function requireAdvancedPlan(interaction, requiredPlan, label) {
+  if (hasPlan(interaction.guild.id, requiredPlan)) return null;
+
+  const planoAtual = getPlano(interaction.guild.id);
+  const planoNecessario = PLANOS[requiredPlan] || PLANOS.basic;
+
+  return interaction.reply({
+    content:
+      `❌ ${label} está disponível apenas para ${planoNecessario.nome}+.
+` +
+      `Seu servidor está no ${planoAtual.nome}.`,
+    ephemeral: true
+  });
+}
+
+async function handlePainelAvancado(interaction) {
+  if (!isAdmin(interaction)) {
+    return interaction.reply({
+      content: "❌ Apenas administradores podem usar o painel avançado.",
+      ephemeral: true
+    });
+  }
+
+  const config = getGuildConfig(interaction.guild.id);
+  const plano = getPlano(interaction.guild.id);
+
+  const embed = new EmbedBuilder()
+    .setTitle("⚙️ Painel Avançado Star Sallers")
+    .setDescription(
+      `Configure e consulte recursos avançados da sua loja.\n\n` +
+      `**Plano atual:** ${plano.emoji} ${plano.nome}\n\n` +
+      `🥉 **Produtos:** Plano Bronze+\n` +
+      `🥈 **Cupons:** Plano VIP+\n` +
+      `🥉 **Compras:** Plano Bronze+\n` +
+      `🥇 **Mensagem personalizada:** Plano Ultimate\n\n` +
+      `Use os botões abaixo para abrir cada área.`
+    )
+    .setColor(config.corPrincipal || "#FFFFFF")
+    .setFooter({ text: "Star Applications • Painel Avançado" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("adv_cupons")
+      .setLabel("Cupons")
+      .setEmoji("🎁")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("adv_produtos")
+      .setLabel("Produtos")
+      .setEmoji("📦")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("adv_embed")
+      .setLabel("Mensagem Personalizada")
+      .setEmoji("📝")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("adv_compras")
+      .setLabel("Compras")
+      .setEmoji("💳")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId("adv_status")
+      .setLabel("Status")
+      .setEmoji("📊")
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+}
+
+async function handleAdvancedCoupons(interaction) {
+  const block = requireAdvancedPlan(interaction, "pro", "Cupons");
+  if (block) return block;
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const coupons = getGuildCoupons(interaction.guild.id);
+  const config = getGuildConfig(interaction.guild.id);
+
+  const lista = coupons.length
+    ? coupons.map((c, i) => `**${i + 1}.** \`${c.codigo}\` — **${c.desconto}% OFF**`).join("\n")
+    : "Nenhum cupom registrado ainda.";
+
+  const embed = new EmbedBuilder()
+    .setTitle("🎁 Cupons registrados")
+    .setDescription(lista.slice(0, 3900))
+    .setColor(config.corPrincipal || "#FFFFFF")
+    .setFooter({ text: "Plano VIP+ • Star Applications" })
+    .setTimestamp();
+
+  return interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+async function handleAdvancedProducts(interaction) {
+  const block = requireAdvancedPlan(interaction, "basic", "Produtos");
+  if (block) return block;
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const products = getGuildProducts(interaction.guild.id);
+  const config = getGuildConfig(interaction.guild.id);
+
+  const lista = products.length
+    ? products.map((p, i) => {
+        const estoque = p.estoque ?? 0;
+        return `**${i + 1}.** ${p.nome || "Sem nome"}\n` +
+          `ID: \`${p.id}\` • Preço: **${moneyBR(p.preco)}** • Estoque: **${estoque}**`;
+      }).join("\n\n")
+    : "Nenhum produto registrado ainda.";
+
+  const embed = new EmbedBuilder()
+    .setTitle("📦 Produtos registrados")
+    .setDescription(lista.slice(0, 3900))
+    .setColor(config.corPrincipal || "#FFFFFF")
+    .setFooter({ text: "Plano Bronze+ • Star Applications" })
+    .setTimestamp();
+
+  return interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+async function handleAdvancedCompras(interaction) {
+  const block = requireAdvancedPlan(interaction, "basic", "Compras");
+  if (block) return block;
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const config = getGuildConfig(interaction.guild.id);
+  const pix = config.compras?.pixKey ? "Configurada" : "Não configurada";
+  const categoria = config.canais?.categoriaCarrinho ? `<#${config.canais.categoriaCarrinho}>` : "Não configurada";
+  const entregas = config.canais?.entregas ? `<#${config.canais.entregas}>` : "Não configurado";
+
+  const embed = new EmbedBuilder()
+    .setTitle("💳 Configurações de Compras")
+    .setDescription(
+      `Configure os dados usados no sistema de carrinho semi-automático.\n\n` +
+      `**Chave Pix:** ${pix}\n` +
+      `**Categoria dos carrinhos:** ${categoria}\n` +
+      `**Canal de entregas:** ${entregas}`
+    )
+    .setColor(config.corPrincipal || "#FFFFFF")
+    .setFooter({ text: "Plano Bronze+ • Star Applications" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("adv_set_pix")
+      .setLabel("Chave Pix")
+      .setEmoji("🔑")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("adv_set_cart_category")
+      .setLabel("Categoria Carrinho")
+      .setEmoji("🛒")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("adv_set_deliveries")
+      .setLabel("Canal Entregas")
+      .setEmoji("📦")
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+}
+
+async function handleAdvancedStatus(interaction) {
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const config = getGuildConfig(interaction.guild.id);
+  const plano = getPlano(interaction.guild.id);
+  const products = getGuildProducts(interaction.guild.id);
+  const coupons = getGuildCoupons(interaction.guild.id);
+  const carts = Object.values(getGuildCarts(interaction.guild.id));
+
+  const embed = new EmbedBuilder()
+    .setTitle("📊 Status do sistema")
+    .setColor(config.corPrincipal || "#FFFFFF")
+    .addFields(
+      { name: "Plano", value: `${plano.emoji} ${plano.nome}`, inline: true },
+      { name: "Produtos", value: `${products.length}/${plano.maxProdutos}`, inline: true },
+      { name: "Cupons", value: `${coupons.length}`, inline: true },
+      { name: "Carrinhos salvos", value: `${carts.length}`, inline: true },
+      { name: "Pix", value: config.compras?.pixKey ? "Configurado" : "Não configurado", inline: true },
+      { name: "Canal entregas", value: config.canais?.entregas ? `<#${config.canais.entregas}>` : "Não configurado", inline: true }
+    )
+    .setFooter({ text: "Star Applications • Status" })
+    .setTimestamp();
+
+  return interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+async function openAdvancedPixModal(interaction) {
+  const block = requireAdvancedPlan(interaction, "basic", "Compras");
+  if (block) return block;
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const config = getGuildConfig(interaction.guild.id);
+  const modal = new ModalBuilder()
+    .setCustomId("modal_adv_pix")
+    .setTitle("Configurar Chave Pix");
+
+  const input = new TextInputBuilder()
+    .setCustomId("pix_key")
+    .setLabel("Chave Pix")
+    .setPlaceholder("E-mail, telefone, CPF/CNPJ ou chave aleatória")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setValue(String(config.compras?.pixKey || "").slice(0, 100));
+
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  return interaction.showModal(modal);
+}
+
+async function saveAdvancedPix(interaction) {
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const pixKey = interaction.fields.getTextInputValue("pix_key").trim();
+
+  if (pixKey.length < 3 || pixKey.length > 120) {
+    return interaction.reply({
+      content: "❌ Chave Pix inválida. Use entre 3 e 120 caracteres.",
+      ephemeral: true
+    });
+  }
+
+  updateGuildConfig(interaction.guild.id, {
+    compras: { pixKey }
+  });
+
+  return interaction.reply({
+    content: "✅ Chave Pix configurada com sucesso. Ela será usada no botão **Ir para pagamento**.",
+    ephemeral: true
+  });
+}
+
+async function openAdvancedCartCategoryModal(interaction) {
+  const block = requireAdvancedPlan(interaction, "basic", "Compras");
+  if (block) return block;
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const config = getGuildConfig(interaction.guild.id);
+  const modal = new ModalBuilder()
+    .setCustomId("modal_adv_cart_category")
+    .setTitle("Categoria dos Carrinhos");
+
+  const input = new TextInputBuilder()
+    .setCustomId("categoria_carrinho")
+    .setLabel("ID da categoria de carrinhos")
+    .setPlaceholder("Exemplo: 123456789012345678")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setValue(String(config.canais?.categoriaCarrinho || "").slice(0, 100));
+
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  return interaction.showModal(modal);
+}
+
+async function saveAdvancedCartCategory(interaction) {
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const categoryId = interaction.fields.getTextInputValue("categoria_carrinho").trim();
+  const category = interaction.guild.channels.cache.get(categoryId);
+
+  if (!category || category.type !== ChannelType.GuildCategory) {
+    return interaction.reply({
+      content: "❌ Categoria inválida. Copie o ID de uma categoria do servidor.",
+      ephemeral: true
+    });
+  }
+
+  updateGuildConfig(interaction.guild.id, {
+    canais: { categoriaCarrinho: categoryId }
+  });
+
+  return interaction.reply({
+    content: `✅ Categoria dos carrinhos configurada para **${category.name}**.`,
+    ephemeral: true
+  });
+}
+
+async function openAdvancedDeliveriesModal(interaction) {
+  const block = requireAdvancedPlan(interaction, "basic", "Compras");
+  if (block) return block;
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const config = getGuildConfig(interaction.guild.id);
+  const modal = new ModalBuilder()
+    .setCustomId("modal_adv_deliveries")
+    .setTitle("Canal de Entregas");
+
+  const input = new TextInputBuilder()
+    .setCustomId("canal_entregas")
+    .setLabel("ID do canal de entregas")
+    .setPlaceholder("Exemplo: 123456789012345678")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setValue(String(config.canais?.entregas || "").slice(0, 100));
+
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  return interaction.showModal(modal);
+}
+
+async function saveAdvancedDeliveries(interaction) {
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const channelId = interaction.fields.getTextInputValue("canal_entregas").trim();
+  const channel = interaction.guild.channels.cache.get(channelId);
+
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    return interaction.reply({
+      content: "❌ Canal inválido. Copie o ID de um canal de texto.",
+      ephemeral: true
+    });
+  }
+
+  updateGuildConfig(interaction.guild.id, {
+    canais: { entregas: channelId }
+  });
+
+  return interaction.reply({
+    content: `✅ Canal de entregas configurado para ${channel}.`,
+    ephemeral: true
+  });
+}
+
+async function openAdvancedEmbedModal(interaction) {
+  const block = requireAdvancedPlan(interaction, "ultimate", "Mensagem Personalizada");
+  if (block) return block;
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId("modal_adv_embed")
+    .setTitle("Enviar Embed Personalizada");
+
+  const channelInput = new TextInputBuilder()
+    .setCustomId("canal_id")
+    .setLabel("ID do canal onde será enviada")
+    .setPlaceholder("Exemplo: 123456789012345678")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  const titleInput = new TextInputBuilder()
+    .setCustomId("titulo")
+    .setLabel("Título da embed")
+    .setPlaceholder("Exemplo: Star Applications")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  const descriptionInput = new TextInputBuilder()
+    .setCustomId("descricao")
+    .setLabel("Descrição da embed")
+    .setPlaceholder("Escreva a mensagem principal aqui")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true);
+
+  const colorInput = new TextInputBuilder()
+    .setCustomId("cor")
+    .setLabel("Cor HEX")
+    .setPlaceholder("#FFFFFF")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false);
+
+  const imageInput = new TextInputBuilder()
+    .setCustomId("imagem")
+    .setLabel("Link de imagem opcional")
+    .setPlaceholder("https://...")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(channelInput),
+    new ActionRowBuilder().addComponents(titleInput),
+    new ActionRowBuilder().addComponents(descriptionInput),
+    new ActionRowBuilder().addComponents(colorInput),
+    new ActionRowBuilder().addComponents(imageInput)
+  );
+
+  return interaction.showModal(modal);
+}
+
+async function sendAdvancedCustomEmbed(interaction) {
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  if (!hasPlan(interaction.guild.id, "ultimate")) {
+    return interaction.reply({
+      content: "❌ Mensagem personalizada está disponível apenas no Plano Ultimate.",
+      ephemeral: true
+    });
+  }
+
+  const channelId = interaction.fields.getTextInputValue("canal_id").trim();
+  const titulo = interaction.fields.getTextInputValue("titulo").trim();
+  const descricao = interaction.fields.getTextInputValue("descricao").trim();
+  const cor = interaction.fields.getTextInputValue("cor").trim() || "#FFFFFF";
+  const imagem = interaction.fields.getTextInputValue("imagem").trim();
+
+  const channel = interaction.guild.channels.cache.get(channelId);
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    return interaction.reply({
+      content: "❌ Canal inválido. Copie o ID de um canal de texto.",
+      ephemeral: true
+    });
+  }
+
+  if (!/^#[0-9A-Fa-f]{6}$/.test(cor)) {
+    return interaction.reply({
+      content: "❌ Cor inválida. Use formato HEX. Exemplo: #FFFFFF",
+      ephemeral: true
+    });
+  }
+
+  if (imagem && !/^https?:\/\//i.test(imagem)) {
+    return interaction.reply({
+      content: "❌ Link de imagem inválido. Use um link começando com http ou https.",
+      ephemeral: true
+    });
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(titulo.slice(0, 256))
+    .setDescription(descricao.slice(0, 4000))
+    .setColor(cor)
+    .setFooter({ text: "Star Applications" })
+    .setTimestamp();
+
+  if (imagem) embed.setImage(imagem);
+
+  await channel.send({ embeds: [embed] });
+
+  return interaction.reply({
+    content: `✅ Embed personalizada enviada em ${channel}.`,
     ephemeral: true
   });
 }
@@ -1571,7 +2082,8 @@ async function handleCartPayment(interaction) {
   }
 
   const totals = calculateCartTotal(cart);
-  const pixKey = process.env.PIX_KEY || process.env.PIX_CHAVE || "Configure PIX_KEY no .env";
+  const config = getGuildConfig(interaction.guild.id);
+  const pixKey = config.compras?.pixKey || process.env.PIX_KEY || process.env.PIX_CHAVE || "Configure a chave Pix em /painelavancado > Compras";
 
   cart.status = "aguardando pagamento";
   saveCart(interaction.guild.id, cart);
@@ -1685,6 +2197,28 @@ async function handleCartConfirm(interaction) {
               { name: "Cupom", value: cart.couponCode || "Nenhum", inline: true },
               { name: "Confirmado por", value: `<@${interaction.user.id}>`, inline: true }
             )
+            .setTimestamp()
+        ]
+      }).catch(() => {});
+    }
+  }
+
+  if (config.canais.entregas) {
+    const canalEntregas = interaction.guild.channels.cache.get(config.canais.entregas);
+    if (canalEntregas) {
+      canalEntregas.send({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("📦 Entrega pendente")
+            .setDescription("Uma compra foi confirmada e está pronta para entrega ou ativação.")
+            .setColor("#FFFFFF")
+            .addFields(
+              { name: "Cliente", value: `<@${cart.userId}>`, inline: true },
+              { name: "Produto", value: cart.productName, inline: true },
+              { name: "Total", value: moneyBR(totals.total), inline: true },
+              { name: "Carrinho", value: `<#${cart.channelId}>`, inline: true }
+            )
+            .setFooter({ text: "Star Applications • Entregas" })
             .setTimestamp()
         ]
       }).catch(() => {});
