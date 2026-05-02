@@ -195,6 +195,7 @@ function getRequiredPlanForCommand(commandName) {
     painel: "basic",
     addproduto: "basic",
     editarproduto: "basic",
+    addticket: "pro",
     addcupom: "pro",
     setplano: "ultimate"
   };
@@ -400,6 +401,64 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("addticket")
+    .setDescription("Cria um painel de tickets com botões personalizados.")
+    .addStringOption(option =>
+      option
+        .setName("titulo")
+        .setDescription("Título do painel de tickets")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("descricao")
+        .setDescription("Descrição do painel de tickets")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("botao1")
+        .setDescription("Botão 1. Exemplo: 🎫 Suporte")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("botao2")
+        .setDescription("Botão 2. Exemplo: 📦 Receber produtos")
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option
+        .setName("botao3")
+        .setDescription("Botão 3. Exemplo: 🚨 Denúncia")
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option
+        .setName("botao4")
+        .setDescription("Botão 4 opcional")
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option
+        .setName("botao5")
+        .setDescription("Botão 5 opcional")
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option
+        .setName("categoria_id")
+        .setDescription("ID da categoria onde os tickets serão criados")
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option
+        .setName("cor")
+        .setDescription("Cor do painel em HEX. Exemplo: #FFFFFF")
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
     .setName("addcupom")
     .setDescription("Adiciona um cupom de desconto à loja. Plano Pro ou Ultimate.")
     .addStringOption(option =>
@@ -585,6 +644,7 @@ client.on("interactionCreate", async interaction => {
       if (interaction.commandName === "painel") return handlePainel(interaction);
       if (interaction.commandName === "addproduto") return handleAddProduto(interaction);
       if (interaction.commandName === "editarproduto") return handleEditarProduto(interaction);
+      if (interaction.commandName === "addticket") return handleAddTicket(interaction);
       if (interaction.commandName === "addcupom") return handleAddCupom(interaction);
     }
 
@@ -596,6 +656,8 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId === "config_msg_entrada") return openMsgEntradaModal(interaction);
       if (interaction.customId === "config_msg_invites") return openMsgInvitesModal(interaction);
       if (interaction.customId.startsWith("comprar_")) return handleComprarProduto(interaction);
+      if (interaction.customId.startsWith("ticket_open_")) return handleOpenTicket(interaction);
+      if (interaction.customId === "ticket_close") return handleCloseTicket(interaction);
     }
 
     if (interaction.isStringSelectMenu()) {
@@ -1253,6 +1315,256 @@ async function handleComprarProduto(interaction) {
       `Abra um ticket ou fale com a equipe para finalizar a compra.`,
     ephemeral: true
   });
+}
+
+// =========================
+// TICKETS
+// =========================
+
+function sanitizeTicketName(text) {
+  return String(text || "ticket")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase()
+    .slice(0, 24) || "ticket";
+}
+
+function parseTicketButton(raw, index) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+
+  const parts = text.split("|").map(part => part.trim()).filter(Boolean);
+
+  if (parts.length >= 2) {
+    return {
+      emoji: parts[0],
+      label: parts.slice(1).join(" ").slice(0, 80),
+      id: sanitizeTicketName(parts.slice(1).join(" ")) || `opcao-${index}`
+    };
+  }
+
+  const emojiMatch = text.match(/^([^\w\s]{1,4})\s+(.+)/u);
+  if (emojiMatch) {
+    return {
+      emoji: emojiMatch[1],
+      label: emojiMatch[2].slice(0, 80),
+      id: sanitizeTicketName(emojiMatch[2]) || `opcao-${index}`
+    };
+  }
+
+  return {
+    emoji: "🎫",
+    label: text.slice(0, 80),
+    id: sanitizeTicketName(text) || `opcao-${index}`
+  };
+}
+
+async function handleAddTicket(interaction) {
+  if (!hasPlan(interaction.guild.id, "pro")) {
+    return interaction.reply({
+      content: "❌ O comando /addticket está disponível apenas no Plano Pro ou Ultimate.",
+      ephemeral: true
+    });
+  }
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({
+      content: "❌ Apenas administradores podem criar painel de tickets.",
+      ephemeral: true
+    });
+  }
+
+  const titulo = interaction.options.getString("titulo");
+  const descricao = interaction.options.getString("descricao");
+  const categoriaId = interaction.options.getString("categoria_id")?.trim() || null;
+  const cor = interaction.options.getString("cor") || "#FFFFFF";
+
+  if (!/^#[0-9A-Fa-f]{6}$/.test(cor)) {
+    return interaction.reply({
+      content: "❌ Cor inválida. Use formato HEX. Exemplo: #FFFFFF",
+      ephemeral: true
+    });
+  }
+
+  let parentId = null;
+  if (categoriaId) {
+    const categoria = interaction.guild.channels.cache.get(categoriaId);
+    if (!categoria || categoria.type !== ChannelType.GuildCategory) {
+      return interaction.reply({
+        content: "❌ Categoria inválida. Envie o ID de uma categoria do servidor.",
+        ephemeral: true
+      });
+    }
+    parentId = categoriaId;
+  }
+
+  const buttons = [];
+  for (let i = 1; i <= 5; i++) {
+    const raw = interaction.options.getString(`botao${i}`);
+    const parsed = parseTicketButton(raw, i);
+    if (parsed) buttons.push(parsed);
+  }
+
+  if (!buttons.length) {
+    return interaction.reply({
+      content: "❌ Adicione pelo menos um botão ao painel.",
+      ephemeral: true
+    });
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(titulo)
+    .setDescription(descricao)
+    .setColor(cor)
+    .setFooter({ text: "Star Applications • Sistema de Tickets" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    buttons.map(btn => {
+      const button = new ButtonBuilder()
+        .setCustomId(`ticket_open_${btn.id}__${parentId || "none"}`)
+        .setLabel(btn.label)
+        .setStyle(ButtonStyle.Secondary);
+
+      if (btn.emoji) button.setEmoji(btn.emoji);
+      return button;
+    })
+  );
+
+  await interaction.channel.send({
+    embeds: [embed],
+    components: [row]
+  });
+
+  return interaction.reply({
+    content: `✅ Painel de tickets criado com ${buttons.length} botão(ões).${parentId ? `\nCategoria dos tickets: <#${parentId}>` : ""}`,
+    ephemeral: true
+  });
+}
+
+async function handleOpenTicket(interaction) {
+  const rawTicketData = interaction.customId.replace("ticket_open_", "");
+  const [rawTicketType, rawParentId] = rawTicketData.split("__");
+  const ticketType = rawTicketType || "ticket";
+  const configuredParentId = rawParentId && rawParentId !== "none" ? rawParentId : null;
+  const cleanUser = sanitizeTicketName(interaction.user.username).slice(0, 18);
+  const channelName = `ticket-${ticketType}-${cleanUser}`.slice(0, 90);
+
+  const existing = interaction.guild.channels.cache.find(channel =>
+    channel.type === ChannelType.GuildText &&
+    channel.name === channelName &&
+    channel.topic &&
+    channel.topic.includes(`USER_ID:${interaction.user.id}`)
+  );
+
+  if (existing) {
+    return interaction.reply({
+      content: `❌ Você já possui um ticket aberto: ${existing}`,
+      ephemeral: true
+    });
+  }
+
+  let parentId = configuredParentId || interaction.channel.parentId || null;
+
+  if (parentId) {
+    const categoria = interaction.guild.channels.cache.get(parentId);
+    if (!categoria || categoria.type !== ChannelType.GuildCategory) parentId = null;
+  }
+
+  const ticketChannel = await interaction.guild.channels.create({
+    name: channelName,
+    type: ChannelType.GuildText,
+    parent: parentId,
+    topic: `Ticket ${ticketType} | USER_ID:${interaction.user.id}`,
+    permissionOverwrites: [
+      {
+        id: interaction.guild.roles.everyone.id,
+        deny: [PermissionsBitField.Flags.ViewChannel]
+      },
+      {
+        id: interaction.user.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.AttachFiles
+        ]
+      },
+      {
+        id: interaction.client.user.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ManageChannels,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      }
+    ]
+  });
+
+  const closeRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("ticket_close")
+      .setLabel("Fechar ticket")
+      .setEmoji("🔒")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  const embed = new EmbedBuilder()
+    .setTitle("🎫 Ticket aberto")
+    .setDescription(
+      `Olá, ${interaction.user}.\n\n` +
+      `Tipo do atendimento: **${ticketType.replaceAll("-", " ")}**\n` +
+      `Explique seu pedido com detalhes para a equipe conseguir ajudar melhor.\n\n` +
+      `Para fechar este atendimento, clique no botão abaixo.`
+    )
+    .setColor("#FFFFFF")
+    .setFooter({ text: "Star Applications • Ticket" })
+    .setTimestamp();
+
+  await ticketChannel.send({
+    content: `${interaction.user}`,
+    embeds: [embed],
+    components: [closeRow]
+  });
+
+  return interaction.reply({
+    content: `✅ Ticket criado: ${ticketChannel}`,
+    ephemeral: true
+  });
+}
+
+async function handleCloseTicket(interaction) {
+  const topic = interaction.channel?.topic || "";
+  const isTicket = interaction.channel?.name?.startsWith("ticket-") || topic.includes("USER_ID:");
+
+  if (!isTicket) {
+    return interaction.reply({
+      content: "❌ Este botão só pode ser usado dentro de um ticket.",
+      ephemeral: true
+    });
+  }
+
+  const ownerId = topic.match(/USER_ID:(\d{17,20})/)?.[1];
+  const canClose = isAdmin(interaction) || interaction.user.id === ownerId;
+
+  if (!canClose) {
+    return interaction.reply({
+      content: "❌ Apenas o dono do ticket ou um administrador pode fechar este ticket.",
+      ephemeral: true
+    });
+  }
+
+  await interaction.reply({
+    content: "🔒 Ticket será fechado em 5 segundos.",
+    ephemeral: true
+  });
+
+  setTimeout(() => {
+    interaction.channel.delete("Ticket fechado").catch(() => {});
+  }, 5000);
 }
 
 // =========================
