@@ -249,6 +249,7 @@ function getRequiredPlanForCommand(commandName) {
     painel: "basic",
     painelavancado: "basic",
     painelanvacado: "basic",
+    painelverificar: "ultimate",
     addproduto: "basic",
     editarproduto: "basic",
     addticket: "pro",
@@ -538,6 +539,58 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("painelverificar")
+    .setDescription("Cria um painel de verificação que entrega um cargo. Plano Ultimate.")
+    .addStringOption(option =>
+      option
+        .setName("titulo")
+        .setDescription("Título do painel de verificação")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("descricao")
+        .setDescription("Descrição do painel de verificação")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("cargo_id")
+        .setDescription("ID do cargo que será entregue ao clicar")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("botao")
+        .setDescription("Texto do botão. Exemplo: Verificar")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("emoji")
+        .setDescription("Emoji do botão. Exemplo: ✅")
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option
+        .setName("imagem")
+        .setDescription("Link da imagem ou GIF do painel")
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option
+        .setName("cor")
+        .setDescription("Cor do painel em HEX. Exemplo: #FFFFFF")
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option
+        .setName("rodape")
+        .setDescription("Texto do rodapé do embed")
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
     .setName("addticket")
     .setDescription("Cria um painel de tickets com botões personalizados.")
     .addStringOption(option =>
@@ -803,6 +856,7 @@ client.on("interactionCreate", async interaction => {
       if (interaction.commandName === "painelavancado" || interaction.commandName === "painelanvacado") return handlePainelAvancado(interaction);
       if (interaction.commandName === "addproduto") return handleAddProduto(interaction);
       if (interaction.commandName === "editarproduto") return handleEditarProduto(interaction);
+      if (interaction.commandName === "painelverificar") return handlePainelVerificar(interaction);
       if (interaction.commandName === "addticket") return handleAddTicket(interaction);
       if (interaction.commandName === "addcupom") return handleAddCupom(interaction);
     }
@@ -828,6 +882,7 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId.startsWith("cart_paid_")) return handleCartPaid(interaction);
       if (interaction.customId.startsWith("cart_confirm_")) return handleCartConfirm(interaction);
       if (interaction.customId.startsWith("cart_close_")) return handleCartClose(interaction);
+      if (interaction.customId.startsWith("verify_role_")) return handleVerifyRole(interaction);
       if (interaction.customId.startsWith("ticket_open_")) return handleOpenTicket(interaction);
       if (interaction.customId === "ticket_close") return handleCloseTicket(interaction);
     }
@@ -2349,6 +2404,161 @@ async function handleCartClose(interaction) {
   setTimeout(() => {
     interaction.channel.delete().catch(() => {});
   }, 5000);
+}
+
+
+// =========================
+// PAINEL DE VERIFICAÇÃO
+// =========================
+
+async function handlePainelVerificar(interaction) {
+  if (!hasPlan(interaction.guild.id, "ultimate")) {
+    return interaction.reply({
+      content: "❌ O comando /painelverificar está disponível apenas no Plano Ultimate.",
+      ephemeral: true
+    });
+  }
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({
+      content: "❌ Apenas administradores podem criar painel de verificação.",
+      ephemeral: true
+    });
+  }
+
+  const titulo = interaction.options.getString("titulo");
+  const descricao = interaction.options.getString("descricao");
+  const cargoId = interaction.options.getString("cargo_id").trim();
+  const botao = interaction.options.getString("botao").trim().slice(0, 80);
+  const emoji = interaction.options.getString("emoji")?.trim() || "✅";
+  const imagem = interaction.options.getString("imagem")?.trim() || null;
+  const cor = interaction.options.getString("cor") || "#FFFFFF";
+  const rodape = interaction.options.getString("rodape") || "Star Applications • Verificação";
+
+  if (!/^#[0-9A-Fa-f]{6}$/.test(cor)) {
+    return interaction.reply({
+      content: "❌ Cor inválida. Use formato HEX. Exemplo: #FFFFFF",
+      ephemeral: true
+    });
+  }
+
+  if (!/^\d{17,20}$/.test(cargoId)) {
+    return interaction.reply({
+      content: "❌ ID do cargo inválido. Ative o modo desenvolvedor e copie o ID do cargo.",
+      ephemeral: true
+    });
+  }
+
+  if (imagem && !/^https?:\/\//i.test(imagem)) {
+    return interaction.reply({
+      content: "❌ Link de imagem inválido. Use um link começando com http ou https.",
+      ephemeral: true
+    });
+  }
+
+  const role = interaction.guild.roles.cache.get(cargoId);
+  if (!role || role.managed || role.id === interaction.guild.roles.everyone.id) {
+    return interaction.reply({
+      content: "❌ Cargo inválido. Confira se o ID é de um cargo normal do servidor.",
+      ephemeral: true
+    });
+  }
+
+  const me = interaction.guild.members.me || await interaction.guild.members.fetchMe().catch(() => null);
+  if (!me || !me.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+    return interaction.reply({
+      content: "❌ O bot precisa da permissão **Gerenciar Cargos** para entregar esse cargo.",
+      ephemeral: true
+    });
+  }
+
+  if (role.position >= me.roles.highest.position) {
+    return interaction.reply({
+      content: "❌ O cargo escolhido está acima ou no mesmo nível do cargo do bot. Coloque o cargo do bot acima do cargo de verificação.",
+      ephemeral: true
+    });
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(titulo)
+    .setDescription(descricao)
+    .setColor(cor)
+    .setFooter({ text: rodape })
+    .setTimestamp();
+
+  if (imagem) embed.setImage(imagem);
+
+  const button = new ButtonBuilder()
+    .setCustomId(`verify_role_${cargoId}`)
+    .setLabel(botao)
+    .setStyle(ButtonStyle.Success);
+
+  if (emoji) {
+    try {
+      button.setEmoji(emoji);
+    } catch (_) {}
+  }
+
+  const row = new ActionRowBuilder().addComponents(button);
+
+  await interaction.channel.send({
+    embeds: [embed],
+    components: [row]
+  });
+
+  return interaction.reply({
+    content: `✅ Painel de verificação criado com sucesso.\nCargo configurado: ${role}`,
+    ephemeral: true
+  });
+}
+
+async function handleVerifyRole(interaction) {
+  if (!hasPlan(interaction.guild.id, "ultimate")) {
+    return interaction.reply({
+      content: "❌ A verificação por botão está disponível apenas enquanto o servidor estiver no Plano Ultimate.",
+      ephemeral: true
+    });
+  }
+
+  const roleId = interaction.customId.replace("verify_role_", "");
+  const role = interaction.guild.roles.cache.get(roleId);
+
+  if (!role || role.managed || role.id === interaction.guild.roles.everyone.id) {
+    return interaction.reply({
+      content: "❌ Cargo de verificação não encontrado ou inválido.",
+      ephemeral: true
+    });
+  }
+
+  const member = interaction.member;
+  if (member.roles.cache.has(role.id)) {
+    return interaction.reply({
+      content: `✅ Você já está verificado e já possui o cargo ${role}.`,
+      ephemeral: true
+    });
+  }
+
+  const me = interaction.guild.members.me || await interaction.guild.members.fetchMe().catch(() => null);
+  if (!me || !me.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+    return interaction.reply({
+      content: "❌ O bot está sem permissão de Gerenciar Cargos.",
+      ephemeral: true
+    });
+  }
+
+  if (role.position >= me.roles.highest.position) {
+    return interaction.reply({
+      content: "❌ Não consigo entregar esse cargo porque ele está acima ou no mesmo nível do meu cargo.",
+      ephemeral: true
+    });
+  }
+
+  await member.roles.add(role, "Verificação pelo painel Star Sallers");
+
+  return interaction.reply({
+    content: `✅ Verificação concluída. Você recebeu o cargo ${role}.`,
+    ephemeral: true
+  });
 }
 
 // =========================
