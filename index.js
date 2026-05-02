@@ -881,6 +881,7 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId.startsWith("cart_payment_")) return handleCartPayment(interaction);
       if (interaction.customId.startsWith("cart_paid_")) return handleCartPaid(interaction);
       if (interaction.customId.startsWith("cart_confirm_")) return handleCartConfirm(interaction);
+      if (interaction.customId.startsWith("cart_delivered_")) return handleCartDelivered(interaction);
       if (interaction.customId.startsWith("cart_close_")) return handleCartClose(interaction);
       if (interaction.customId.startsWith("verify_role_")) return handleVerifyRole(interaction);
       if (interaction.customId.startsWith("ticket_open_")) return handleOpenTicket(interaction);
@@ -2379,13 +2380,107 @@ async function handleCartConfirm(interaction) {
     }
   }
 
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cart_delivered_${cart.id}`)
+      .setLabel("Produto Entregue!")
+      .setEmoji("📦")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`cart_close_${cart.id}`)
+      .setLabel("Fechar carrinho")
+      .setEmoji("🔒")
+      .setStyle(ButtonStyle.Danger)
+  );
+
   return interaction.reply({
     content:
       `✅ Pagamento confirmado com sucesso.\n\n` +
       `Cliente: <@${cart.userId}>\n` +
       `Produto: **${cart.productName}**\n` +
       `Total: **${moneyBR(totals.total)}**\n\n` +
-      `Agora a equipe pode entregar o produto ou ativar o plano com /setplano.`,
+      `Após entregar o pedido, clique em **Produto Entregue!** para registrar no canal de entregas.`,
+    components: [row],
+    ephemeral: false
+  });
+}
+
+async function handleCartDelivered(interaction) {
+  const cartId = interaction.customId.replace("cart_delivered_", "");
+  const cart = getCart(interaction.guild.id, cartId);
+
+  if (!cart) {
+    return interaction.reply({
+      content: "❌ Carrinho não encontrado.",
+      ephemeral: true
+    });
+  }
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({
+      content: "❌ Apenas administradores podem marcar o produto como entregue.",
+      ephemeral: true
+    });
+  }
+
+  if (cart.status === "produto entregue") {
+    return interaction.reply({
+      content: "⚠️ Este pedido já foi marcado como entregue.",
+      ephemeral: true
+    });
+  }
+
+  const config = getGuildConfig(interaction.guild.id);
+  const totals = calculateCartTotal(cart);
+
+  cart.status = "produto entregue";
+  cart.deliveredBy = interaction.user.id;
+  cart.deliveredAt = new Date().toISOString();
+  saveCart(interaction.guild.id, cart);
+
+  let entregaEnviada = false;
+
+  if (config.canais.entregas) {
+    const canalEntregas = interaction.guild.channels.cache.get(config.canais.entregas);
+
+    if (canalEntregas) {
+      await canalEntregas.send({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("📦 Produto entregue")
+            .setDescription("Um pedido foi marcado como entregue pela equipe.")
+            .setColor("#FFFFFF")
+            .addFields(
+              { name: "Cliente", value: `<@${cart.userId}>`, inline: true },
+              { name: "Produto", value: cart.productName || "Produto", inline: true },
+              { name: "Total", value: moneyBR(totals.total), inline: true },
+              { name: "Entregue por", value: `<@${interaction.user.id}>`, inline: true },
+              { name: "Carrinho", value: `<#${cart.channelId}>`, inline: true }
+            )
+            .setFooter({ text: "Star Applications • Pedido entregue" })
+            .setTimestamp()
+        ]
+      }).catch(() => null);
+
+      entregaEnviada = true;
+    }
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cart_close_${cart.id}`)
+      .setLabel("Fechar carrinho")
+      .setEmoji("🔒")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return interaction.reply({
+    content:
+      `✅ Produto marcado como entregue.\n\n` +
+      `Cliente: <@${cart.userId}>\n` +
+      `Produto: **${cart.productName}**\n` +
+      `Canal de entregas: ${entregaEnviada ? "mensagem enviada com sucesso." : "não configurado ou não encontrado."}`,
+    components: [row],
     ephemeral: false
   });
 }
