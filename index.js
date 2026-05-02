@@ -47,12 +47,24 @@ if (!TOKEN) {
 const DB_FILE = path.join(__dirname, "database.json");
 
 const PLAN_LEVELS = {
+  cancelado: 0,
   basic: 1,
   pro: 2,
   ultimate: 3
 };
 
 const PLANOS = {
+  cancelado: {
+    nome: "Plano Cancelado",
+    emoji: "⛔",
+    maxProdutos: 0,
+    cupons: false,
+    personalizacaoEntrada: false,
+    personalizacaoInvites: false,
+    logsVendas: false,
+    suportePrioritario: false,
+    cancelado: true
+  },
   basic: {
     nome: "Plano Basic",
     emoji: "🥉",
@@ -132,6 +144,12 @@ function getDefaultGuildConfig() {
     compras: {
       pixKey: null
     },
+    cancelamento: {
+      ativo: false,
+      motivo: null,
+      canceladoPor: null,
+      canceladoEm: null
+    },
     mensagens: {
       entrada: "Bem-vindo(a), {user}, à {server}! Leia os canais de informações e aproveite sua experiência.",
       invites: "{user} entrou no servidor. Convite usado: {invite}. Total de membros: {members}."
@@ -191,11 +209,31 @@ function getPlano(guildId) {
 }
 
 function setGuildPlan(guildId, plano) {
-  if (!PLANOS[plano]) {
+  if (!["basic", "pro", "ultimate"].includes(plano)) {
     throw new Error("Plano inválido. Use basic, pro ou ultimate.");
   }
 
-  return updateGuildConfig(guildId, { plano });
+  return updateGuildConfig(guildId, {
+    plano,
+    cancelamento: {
+      ativo: false,
+      motivo: null,
+      canceladoPor: null,
+      canceladoEm: null
+    }
+  });
+}
+
+function cancelGuildPlan(guildId, motivo, userId) {
+  return updateGuildConfig(guildId, {
+    plano: "cancelado",
+    cancelamento: {
+      ativo: true,
+      motivo: motivo || "Não informado",
+      canceladoPor: userId || null,
+      canceladoEm: new Date().toISOString()
+    }
+  });
 }
 
 function hasPlan(guildId, requiredPlan) {
@@ -215,6 +253,7 @@ function getRequiredPlanForCommand(commandName) {
     editarproduto: "basic",
     addticket: "pro",
     addcupom: "pro",
+    cancelarplano: "ultimate",
     setplano: "ultimate"
   };
 
@@ -593,6 +632,22 @@ const commands = [
           { name: "Plano Pro", value: "pro" },
           { name: "Plano Ultimate", value: "ultimate" }
         )
+    ),
+
+  new SlashCommandBuilder()
+    .setName("cancelarplano")
+    .setDescription("Cancela o plano de um servidor inadimplente. Apenas o dono do bot pode usar.")
+    .addStringOption(option =>
+      option
+        .setName("guild_id")
+        .setDescription("ID do servidor que terá o plano cancelado")
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName("motivo")
+        .setDescription("Motivo do cancelamento. Exemplo: inadimplência")
+        .setRequired(false)
     )
 ].map(command => command.toJSON());
 
@@ -725,16 +780,21 @@ client.on("interactionCreate", async interaction => {
   try {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === "setplano") return handleSetPlano(interaction);
+      if (interaction.commandName === "cancelarplano") return handleCancelarPlano(interaction);
 
       const requiredPlan = getRequiredPlanForCommand(interaction.commandName);
       if (!hasPlan(interaction.guild.id, requiredPlan)) {
         const planoAtual = getPlano(interaction.guild.id);
         const planoNecessario = PLANOS[requiredPlan];
 
+        const configAtual = getGuildConfig(interaction.guild.id);
+        const motivoCancelamento = configAtual.cancelamento?.motivo || "assinatura cancelada";
+        const mensagemBloqueio = getPlanoKey(interaction.guild.id) === "cancelado"
+          ? `❌ A assinatura deste servidor está cancelada.\nMotivo: ${motivoCancelamento}\n\nPara voltar a usar o Star Sallers, entre em contato com a Star Applications e renove seu plano.`
+          : `❌ Este comando pertence ao ${planoNecessario.nome}.\nSeu servidor está no ${planoAtual.nome}. Faça upgrade para usar.`;
+
         return interaction.reply({
-          content:
-            `❌ Este comando pertence ao ${planoNecessario.nome}.\n` +
-            `Seu servidor está no ${planoAtual.nome}. Faça upgrade para usar.`,
+          content: mensagemBloqueio,
           ephemeral: true
         });
       }
@@ -990,6 +1050,45 @@ async function handleSetPlano(interaction) {
       `Servidor: ${targetGuild ? `**${targetGuild.name}**` : "não encontrado no cache do bot"}\n` +
       `ID: \`${guildId}\`\n` +
       `Plano: ${planoInfo.emoji} **${planoInfo.nome}**`,
+    ephemeral: true
+  });
+}
+
+async function handleCancelarPlano(interaction) {
+  if (!isBotOwner(interaction.user.id)) {
+    return interaction.reply({
+      content: "❌ Apenas o dono do bot pode usar este comando.",
+      ephemeral: true
+    });
+  }
+
+  const guildId = interaction.options.getString("guild_id").trim();
+  const motivo = interaction.options.getString("motivo")?.trim() || "Inadimplência / assinatura não renovada";
+
+  if (!/^\d{17,20}$/.test(guildId)) {
+    return interaction.reply({
+      content: "❌ ID do servidor inválido. Ative o modo desenvolvedor e copie o ID do servidor.",
+      ephemeral: true
+    });
+  }
+
+  const targetGuild = client.guilds.cache.get(guildId);
+  cancelGuildPlan(guildId, motivo, interaction.user.id);
+
+  const config = getGuildConfig(guildId);
+  const canceladoEm = config.cancelamento?.canceladoEm
+    ? new Date(config.cancelamento.canceladoEm).toLocaleString("pt-BR")
+    : "agora";
+
+  return interaction.reply({
+    content:
+      `✅ Plano cancelado com sucesso.\n\n` +
+      `Servidor: ${targetGuild ? `**${targetGuild.name}**` : "não encontrado no cache do bot"}\n` +
+      `ID: \`${guildId}\`\n` +
+      `Status: ⛔ **Cancelado**\n` +
+      `Motivo: ${motivo}\n` +
+      `Cancelado em: ${canceladoEm}\n\n` +
+      `Os comandos pagos foram bloqueados para este servidor. Para reativar, use \`/setplano\` com basic, pro ou ultimate.`,
     ephemeral: true
   });
 }
