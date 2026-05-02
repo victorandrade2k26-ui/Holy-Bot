@@ -566,19 +566,21 @@ const commands = [
 ].map(command => command.toJSON());
 
 async function registerCommands() {
-  if (!CLIENT_ID || !GUILD_ID) {
-    console.log("CLIENT_ID ou GUILD_ID não encontrado no .env. Comandos não registrados automaticamente.");
+  if (!CLIENT_ID) {
+    console.log("CLIENT_ID não encontrado no .env. Comandos não registrados.");
     return;
   }
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
   try {
-    console.log("Registrando comandos...");
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+    console.log("Registrando comandos globais...");
+
+    await rest.put(Routes.applicationCommands(CLIENT_ID), {
       body: commands
     });
-    console.log("Comandos registrados com sucesso.");
+
+    console.log("Comandos globais registrados com sucesso.");
   } catch (err) {
     console.log("Erro ao registrar comandos:", err);
   }
