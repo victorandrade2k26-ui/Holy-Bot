@@ -139,7 +139,16 @@ function getDefaultGuildConfig() {
       invites: null,
       logsVendas: null,
       categoriaCarrinho: null,
-      entregas: null
+      entregas: null,
+      avisosPlano: null
+    },
+    assinatura: {
+      status: "ativa",
+      iniciadoEm: null,
+      venceEm: null,
+      duracaoDias: null,
+      definidoPor: null,
+      ultimoAvisoDias: null
     },
     compras: {
       pixKey: null
@@ -200,6 +209,14 @@ function deepMerge(target, source) {
 
 function getPlanoKey(guildId) {
   const config = getGuildConfig(guildId);
+
+  if (config.plano !== "cancelado" && config.assinatura?.venceEm) {
+    const vencimento = new Date(config.assinatura.venceEm);
+    if (!Number.isNaN(vencimento.getTime()) && vencimento.getTime() < Date.now()) {
+      return "cancelado";
+    }
+  }
+
   return PLANOS[config.plano] ? config.plano : "basic";
 }
 
@@ -208,13 +225,25 @@ function getPlano(guildId) {
   return PLANOS[planoKey] || PLANOS.basic;
 }
 
-function setGuildPlan(guildId, plano) {
+function setGuildPlan(guildId, plano, duracaoDias = 30, userId = null) {
   if (!["basic", "pro", "ultimate"].includes(plano)) {
     throw new Error("Plano inválido. Use basic, pro ou ultimate.");
   }
 
+  const dias = Math.max(1, Math.min(3650, Number(duracaoDias || 30)));
+  const agora = new Date();
+  const venceEm = addDays(agora, dias).toISOString();
+
   return updateGuildConfig(guildId, {
     plano,
+    assinatura: {
+      status: "ativa",
+      iniciadoEm: agora.toISOString(),
+      venceEm,
+      duracaoDias: dias,
+      definidoPor: userId,
+      ultimoAvisoDias: null
+    },
     cancelamento: {
       ativo: false,
       motivo: null,
@@ -232,6 +261,9 @@ function cancelGuildPlan(guildId, motivo, userId) {
       motivo: motivo || "Não informado",
       canceladoPor: userId || null,
       canceladoEm: new Date().toISOString()
+    },
+    assinatura: {
+      status: "cancelado"
     }
   });
 }
@@ -249,6 +281,7 @@ function getRequiredPlanForCommand(commandName) {
     painel: "basic",
     painelavancado: "basic",
     painelanvacado: "basic",
+    verplano: "cancelado",
     painelverificar: "ultimate",
     addproduto: "basic",
     editarproduto: "basic",
@@ -348,6 +381,37 @@ function deleteCart(guildId, cartId) {
 
 function moneyBR(value) {
   return `R$ ${Number(value || 0).toFixed(2).replace(".", ",")}`;
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + Number(days || 0));
+  return d;
+}
+
+function formatDateBR(value) {
+  if (!value) return "Não definido";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Data inválida";
+  return date.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+}
+
+function getDaysRemaining(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const diff = date.getTime() - Date.now();
+  return Math.ceil(diff / (1000 * 60 * 60 * 24));
+}
+
+function getSubscriptionStatusText(config) {
+  const assinatura = config.assinatura || {};
+  if (config.plano === "cancelado" || assinatura.status === "cancelado") return "Cancelado";
+  const dias = getDaysRemaining(assinatura.venceEm);
+  if (dias === null) return "Sem vencimento configurado";
+  if (dias < 0) return `Vencido há ${Math.abs(dias)} dia(s)`;
+  if (dias === 0) return "Vence hoje";
+  return `Vence em ${dias} dia(s)`;
 }
 
 function calculateCartTotal(cart) {
@@ -667,6 +731,16 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("verplano")
+    .setDescription("Mostra as informações do plano e vencimento deste servidor.")
+    .addStringOption(option =>
+      option
+        .setName("guild_id")
+        .setDescription("ID do servidor para consulta. Apenas o dono do bot pode usar esta opção")
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
     .setName("setplano")
     .setDescription("Define o plano de um servidor. Apenas o dono do bot pode usar.")
     .addStringOption(option =>
@@ -685,6 +759,14 @@ const commands = [
           { name: "Plano Pro", value: "pro" },
           { name: "Plano Ultimate", value: "ultimate" }
         )
+    )
+    .addIntegerOption(option =>
+      option
+        .setName("dias")
+        .setDescription("Duração da assinatura em dias. Exemplo: 30 ou 90")
+        .setRequired(false)
+        .setMinValue(1)
+        .setMaxValue(3650)
     ),
 
   new SlashCommandBuilder()
@@ -734,6 +816,9 @@ client.once("ready", async () => {
     await cacheGuildInvites(guild);
     getGuildConfig(guild.id);
   }
+
+  await checkPlanExpirations();
+  setInterval(checkPlanExpirations, 1000 * 60 * 60 * 6);
 });
 
 async function cacheGuildInvites(guild) {
@@ -752,6 +837,76 @@ async function cacheGuildInvites(guild) {
     updateGuildConfig(guild.id, { inviteCache });
   } catch (err) {
     console.log(`Não consegui carregar invites de ${guild.name}. Verifique permissão Gerenciar Servidor.`);
+  }
+}
+
+async function checkPlanExpirations() {
+  const db = loadDB();
+  const now = Date.now();
+
+  for (const [guildId, config] of Object.entries(db.guilds || {})) {
+    if (!config || config.plano === "cancelado") continue;
+    if (!config.assinatura?.venceEm) continue;
+
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) continue;
+
+    const vencimento = new Date(config.assinatura.venceEm);
+    if (Number.isNaN(vencimento.getTime())) continue;
+
+    const dias = Math.ceil((vencimento.getTime() - now) / (1000 * 60 * 60 * 24));
+    const avisoCanalId = config.canais?.avisosPlano;
+    const canalAvisos = avisoCanalId ? guild.channels.cache.get(avisoCanalId) : null;
+
+    if (dias < 0) {
+      db.guilds[guildId] = deepMerge(config, {
+        plano: "cancelado",
+        assinatura: { status: "vencida", ultimoAvisoDias: "vencido" },
+        cancelamento: {
+          ativo: true,
+          motivo: "Assinatura vencida automaticamente",
+          canceladoPor: client.user?.id || null,
+          canceladoEm: new Date().toISOString()
+        }
+      });
+      saveDB(db);
+
+      if (canalAvisos) {
+        canalAvisos.send({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle("⛔ Assinatura vencida")
+              .setDescription("A assinatura deste servidor venceu e os recursos do Star Sallers foram bloqueados.\n\nPara reativar, entre em contato com a Star Applications.")
+              .setColor("#FFFFFF")
+              .setFooter({ text: "Star Applications • Gerenciamento de Plano" })
+              .setTimestamp()
+          ]
+        }).catch(() => {});
+      }
+      continue;
+    }
+
+    if (![7, 3, 1, 0].includes(dias)) continue;
+    if (String(config.assinatura?.ultimoAvisoDias) === String(dias)) continue;
+
+    db.guilds[guildId] = deepMerge(config, {
+      assinatura: { ultimoAvisoDias: dias }
+    });
+    saveDB(db);
+
+    if (canalAvisos) {
+      const textoDias = dias === 0 ? "vence hoje" : `vence em ${dias} dia(s)`;
+      canalAvisos.send({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("⏰ Aviso de assinatura")
+            .setDescription(`A assinatura do Star Sallers neste servidor **${textoDias}**.\n\nPara renovar ou gerenciar seu plano, entre no servidor oficial da Star Applications:\nhttps://discord.gg/RTEvRZYU4`)
+            .setColor("#FFFFFF")
+            .setFooter({ text: "Star Applications • Gerenciamento de Plano" })
+            .setTimestamp()
+        ]
+      }).catch(() => {});
+    }
   }
 }
 
@@ -834,6 +989,7 @@ client.on("interactionCreate", async interaction => {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === "setplano") return handleSetPlano(interaction);
       if (interaction.commandName === "cancelarplano") return handleCancelarPlano(interaction);
+      if (interaction.commandName === "verplano") return handleVerPlano(interaction);
 
       const requiredPlan = getRequiredPlanForCommand(interaction.commandName);
       if (!hasPlan(interaction.guild.id, requiredPlan)) {
@@ -869,6 +1025,8 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId === "adv_embed") return openAdvancedEmbedModal(interaction);
       if (interaction.customId === "adv_compras") return handleAdvancedCompras(interaction);
       if (interaction.customId === "adv_status") return handleAdvancedStatus(interaction);
+      if (interaction.customId === "adv_assinatura") return handleAdvancedAssinatura(interaction);
+      if (interaction.customId === "adv_set_plan_notice") return openAdvancedPlanNoticeModal(interaction);
       if (interaction.customId === "adv_set_pix") return openAdvancedPixModal(interaction);
       if (interaction.customId === "adv_set_cart_category") return openAdvancedCartCategoryModal(interaction);
       if (interaction.customId === "adv_set_deliveries") return openAdvancedDeliveriesModal(interaction);
@@ -902,6 +1060,7 @@ client.on("interactionCreate", async interaction => {
       if (interaction.customId === "modal_adv_cart_category") return saveAdvancedCartCategory(interaction);
       if (interaction.customId === "modal_adv_deliveries") return saveAdvancedDeliveries(interaction);
       if (interaction.customId === "modal_adv_embed") return sendAdvancedCustomEmbed(interaction);
+      if (interaction.customId === "modal_adv_plan_notice") return saveAdvancedPlanNotice(interaction);
     }
   } catch (err) {
     console.log("Erro em interactionCreate:", err);
@@ -1061,13 +1220,96 @@ async function handleSelectPlano(interaction) {
   }
 
   const plano = interaction.values[0];
-  setGuildPlan(interaction.guild.id, plano);
+  setGuildPlan(interaction.guild.id, plano, 30, interaction.user.id);
 
   const planoInfo = PLANOS[plano];
   return interaction.reply({
     content: `✅ Plano alterado para ${planoInfo.emoji} **${planoInfo.nome}**.`,
     ephemeral: true
   });
+}
+
+async function handleVerPlano(interaction) {
+  if (!interaction.guild) {
+    return interaction.reply({
+      content: "❌ Este comando só pode ser usado dentro de um servidor.",
+      ephemeral: true
+    });
+  }
+
+  const requestedGuildId = interaction.options.getString("guild_id")?.trim() || interaction.guild.id;
+
+  if (requestedGuildId !== interaction.guild.id && !isBotOwner(interaction.user.id)) {
+    return interaction.reply({
+      content: "❌ Apenas o dono do bot pode consultar o plano de outro servidor.",
+      ephemeral: true
+    });
+  }
+
+  if (!isAdmin(interaction) && !isBotOwner(interaction.user.id)) {
+    return interaction.reply({
+      content: "❌ Apenas administradores podem ver as informações do plano deste servidor.",
+      ephemeral: true
+    });
+  }
+
+  if (!/^\d{17,20}$/.test(requestedGuildId)) {
+    return interaction.reply({
+      content: "❌ ID do servidor inválido.",
+      ephemeral: true
+    });
+  }
+
+  const config = getGuildConfig(requestedGuildId);
+  const planoKey = getPlanoKey(requestedGuildId);
+  const plano = PLANOS[planoKey] || PLANOS.basic;
+  const assinatura = config.assinatura || {};
+  const dias = getDaysRemaining(assinatura.venceEm);
+  const targetGuild = client.guilds.cache.get(requestedGuildId);
+  const canalAvisos = config.canais?.avisosPlano ? `<#${config.canais.avisosPlano}>` : "Não configurado";
+  const canalEntregas = config.canais?.entregas ? `<#${config.canais.entregas}>` : "Não configurado";
+  const categoriaCarrinho = config.canais?.categoriaCarrinho ? `<#${config.canais.categoriaCarrinho}>` : "Não configurada";
+
+  const embed = new EmbedBuilder()
+    .setTitle("⏰ Informações do Plano")
+    .setDescription(
+      `Informações da assinatura do servidor.\n\n` +
+      `**Servidor:** ${targetGuild ? targetGuild.name : "Não encontrado no cache do bot"}\n` +
+      `**ID:** \`${requestedGuildId}\`\n` +
+      `**Plano:** ${plano.emoji} **${plano.nome}**\n` +
+      `**Status:** ${getSubscriptionStatusText(config)}\n` +
+      `**Início:** ${formatDateBR(assinatura.iniciadoEm)}\n` +
+      `**Vencimento:** ${formatDateBR(assinatura.venceEm)}\n` +
+      `**Duração:** ${assinatura.duracaoDias ? `${assinatura.duracaoDias} dia(s)` : "Não definida"}\n` +
+      `**Dias restantes:** ${dias === null ? "Não definido" : `${dias} dia(s)`}\n\n` +
+      `**Canal de avisos:** ${canalAvisos}\n` +
+      `**Categoria carrinho:** ${categoriaCarrinho}\n` +
+      `**Canal de entregas:** ${canalEntregas}`
+    )
+    .setColor(config.corPrincipal || "#FFFFFF")
+    .setFooter({ text: "Star Applications • Ver plano" })
+    .setTimestamp();
+
+  if (config.cancelamento?.ativo || planoKey === "cancelado") {
+    embed.addFields({
+      name: "⛔ Cancelamento",
+      value:
+        `Motivo: ${config.cancelamento?.motivo || "Não informado"}\n` +
+        `Cancelado em: ${formatDateBR(config.cancelamento?.canceladoEm)}\n` +
+        `Cancelado por: ${config.cancelamento?.canceladoPor ? `<@${config.cancelamento.canceladoPor}>` : "Não informado"}`,
+      inline: false
+    });
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setLabel("Gerenciar Plano")
+      .setEmoji("🔗")
+      .setStyle(ButtonStyle.Link)
+      .setURL("https://discord.gg/RTEvRZYU4")
+  );
+
+  return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
 }
 
 async function handleSetPlano(interaction) {
@@ -1080,6 +1322,7 @@ async function handleSetPlano(interaction) {
 
   const guildId = interaction.options.getString("guild_id").trim();
   const plano = interaction.options.getString("plano");
+  const dias = interaction.options.getInteger("dias") || 30;
 
   if (!/^\d{17,20}$/.test(guildId)) {
     return interaction.reply({
@@ -1096,7 +1339,7 @@ async function handleSetPlano(interaction) {
   }
 
   const targetGuild = client.guilds.cache.get(guildId);
-  setGuildPlan(guildId, plano);
+  const configAtualizada = setGuildPlan(guildId, plano, dias, interaction.user.id);
 
   const planoInfo = PLANOS[plano];
 
@@ -1105,7 +1348,9 @@ async function handleSetPlano(interaction) {
       `✅ Plano definido com sucesso.\n\n` +
       `Servidor: ${targetGuild ? `**${targetGuild.name}**` : "não encontrado no cache do bot"}\n` +
       `ID: \`${guildId}\`\n` +
-      `Plano: ${planoInfo.emoji} **${planoInfo.nome}**`,
+      `Plano: ${planoInfo.emoji} **${planoInfo.nome}**\n` +
+      `Duração: **${dias} dia(s)**\n` +
+      `Vencimento: **${formatDateBR(configAtualizada.assinatura?.venceEm)}**`,
     ephemeral: true
   });
 }
@@ -1223,7 +1468,121 @@ async function handlePainelAvancado(interaction) {
       .setStyle(ButtonStyle.Secondary)
   );
 
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("adv_assinatura")
+      .setLabel("Assinatura")
+      .setEmoji("⏰")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setLabel("Gerenciar Plano")
+      .setEmoji("🔗")
+      .setStyle(ButtonStyle.Link)
+      .setURL("https://discord.gg/RTEvRZYU4")
+  );
+
+  return interaction.reply({ embeds: [embed], components: [row, row2], ephemeral: true });
+}
+
+async function handleAdvancedAssinatura(interaction) {
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const config = getGuildConfig(interaction.guild.id);
+  const plano = getPlano(interaction.guild.id);
+  const assinatura = config.assinatura || {};
+  const avisos = config.canais?.avisosPlano ? `<#${config.canais.avisosPlano}>` : "Não configurado";
+  const dias = getDaysRemaining(assinatura.venceEm);
+
+  const embed = new EmbedBuilder()
+    .setTitle("⏰ Gerenciamento de Plano")
+    .setDescription(
+      `Veja as informações da assinatura deste servidor.
+
+` +
+      `**Plano atual:** ${plano.emoji} ${plano.nome}
+` +
+      `**Status:** ${getSubscriptionStatusText(config)}
+` +
+      `**Início:** ${formatDateBR(assinatura.iniciadoEm)}
+` +
+      `**Vencimento:** ${formatDateBR(assinatura.venceEm)}
+` +
+      `**Duração:** ${assinatura.duracaoDias ? `${assinatura.duracaoDias} dia(s)` : "Não definida"}
+` +
+      `**Dias restantes:** ${dias === null ? "Não definido" : `${dias} dia(s)`}
+` +
+      `**Canal de avisos:** ${avisos}
+
+` +
+      `Para renovar ou alterar seu plano, entre no servidor oficial da Star Applications.`
+    )
+    .setColor(config.corPrincipal || "#FFFFFF")
+    .setFooter({ text: "Star Applications • Assinatura" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("adv_set_plan_notice")
+      .setLabel("Canal de Avisos")
+      .setEmoji("📢")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setLabel("Gerenciar Plano")
+      .setEmoji("🔗")
+      .setStyle(ButtonStyle.Link)
+      .setURL("https://discord.gg/RTEvRZYU4")
+  );
+
   return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+}
+
+async function openAdvancedPlanNoticeModal(interaction) {
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const config = getGuildConfig(interaction.guild.id);
+  const modal = new ModalBuilder()
+    .setCustomId("modal_adv_plan_notice")
+    .setTitle("Canal de Avisos do Plano");
+
+  const input = new TextInputBuilder()
+    .setCustomId("canal_avisos_plano")
+    .setLabel("ID do canal de avisos do plano")
+    .setPlaceholder("Exemplo: 123456789012345678")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setValue(String(config.canais?.avisosPlano || "").slice(0, 100));
+
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  return interaction.showModal(modal);
+}
+
+async function saveAdvancedPlanNotice(interaction) {
+  if (!isAdmin(interaction)) {
+    return interaction.reply({ content: "❌ Sem permissão.", ephemeral: true });
+  }
+
+  const channelId = interaction.fields.getTextInputValue("canal_avisos_plano").trim();
+  const channel = interaction.guild.channels.cache.get(channelId);
+
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    return interaction.reply({
+      content: "❌ Canal inválido. Copie o ID de um canal de texto.",
+      ephemeral: true
+    });
+  }
+
+  updateGuildConfig(interaction.guild.id, {
+    canais: { avisosPlano: channelId }
+  });
+
+  return interaction.reply({
+    content: `✅ Canal de avisos do plano configurado para ${channel}.`,
+    ephemeral: true
+  });
 }
 
 async function handleAdvancedCoupons(interaction) {
@@ -1346,7 +1705,9 @@ async function handleAdvancedStatus(interaction) {
       { name: "Cupons", value: `${coupons.length}`, inline: true },
       { name: "Carrinhos salvos", value: `${carts.length}`, inline: true },
       { name: "Pix", value: config.compras?.pixKey ? "Configurado" : "Não configurado", inline: true },
-      { name: "Canal entregas", value: config.canais?.entregas ? `<#${config.canais.entregas}>` : "Não configurado", inline: true }
+      { name: "Canal entregas", value: config.canais?.entregas ? `<#${config.canais.entregas}>` : "Não configurado", inline: true },
+      { name: "Assinatura", value: getSubscriptionStatusText(config), inline: true },
+      { name: "Avisos do plano", value: config.canais?.avisosPlano ? `<#${config.canais.avisosPlano}>` : "Não configurado", inline: true }
     )
     .setFooter({ text: "Star Applications • Status" })
     .setTimestamp();
