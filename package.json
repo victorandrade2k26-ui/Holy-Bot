@@ -1,16 +1,18 @@
 {
-  "name": "star-sallers",
+  "name": "star-applications-bot",
   "version": "1.0.0",
-  "description": "Bot Star Sallers - sistema de vendas com planos, carrinho, tickets e painel avançado.",
+  "description": "Bot de vendas, tickets, planos, produtos, cupons e paineis para Star Applications.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "discord.js": "^14.16.3",
-    "dotenv": "^16.4.5"
+    "start": "node index.js",
+    "check": "node --check index.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@discordjs/voice": "latest",
+    "discord.js": "latest",
+    "dotenv": "latest"
   }
 }
