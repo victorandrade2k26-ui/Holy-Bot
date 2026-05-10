@@ -1,7 +1,7 @@
 /*
   Star Applications Bot - discord.js v14
   Powered by: @00yvn
-  Proprietário(a): @00yvn
+  Proprietário(a): @29nsb
   Star Applications: https://discord.gg/starapplications
 
   Instalação:
@@ -59,7 +59,7 @@ const BRAND = {
   powered: 'Powered by: @00yvn',
   owner: 'Proprietário(a): @29nsb',
   invite: "`Star Applications`: https://discord.gg/starapplications",
-  footer: "Star Applications - Total direitos reservados.",
+  footer: "Star Apps - Total direitos reservados ©",
   defaultColor: 0x2b6cff,
   black: 0x0d0d0d,
 };
@@ -327,7 +327,7 @@ function brandEmbed(guildId, title, description) {
   const g = guildDB(guildId);
   return new EmbedBuilder()
     .setTitle(title)
-    .setDescription(`${description || ''}\n\n${BRAND.powered}\n${BRAND.owner}\n${BRAND.invite}`)
+    .setDescription(description || '')
     .setColor(g.config.mainColor || BRAND.defaultColor)
     .setFooter({ text: BRAND.footer })
     .setTimestamp();
