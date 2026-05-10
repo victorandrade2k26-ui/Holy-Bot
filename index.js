@@ -1,7 +1,7 @@
 /*
   Star Applications Bot - discord.js v14
   Powered by: @00yvn
-  Proprietário(a): @29nsb
+  Proprietário(a): @00yvn
   Star Applications: https://discord.gg/starapplications
 
   Instalação:
